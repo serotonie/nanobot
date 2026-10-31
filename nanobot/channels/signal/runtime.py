@@ -750,7 +750,7 @@ class SignalChannel(BaseChannel):
                 )
             return
 
-        content, media_paths = self._assemble_inbound_content(
+        content, media_paths = await self._assemble_inbound_content(
             sender_name=sender_name,
             sender_number=sender_number,
             message_text=message_text,
@@ -840,7 +840,7 @@ class SignalChannel(BaseChannel):
                 return False, chat_id
         return True, chat_id
 
-    def _assemble_inbound_content(
+    async def _assemble_inbound_content(
         self,
         *,
         sender_name: str | None,
@@ -883,7 +883,15 @@ class SignalChannel(BaseChannel):
                         media_type = content_type.split("/")[0] if "/" in content_type else "file"
                         if media_type not in ("image", "audio", "video"):
                             media_type = "file"
-                        content_parts.append(f"[{media_type}: {dest_path}]")
+                        if media_type == "audio":
+                            transcription = await self.transcribe_audio(dest_path)
+                            if transcription:
+                                self.logger.info("Transcribed audio: {}...", transcription[:50])
+                                content_parts.append(f"[transcription: {transcription}]")
+                            else:
+                                content_parts.append(f"[audio: {dest_path}]")
+                        else:
+                            content_parts.append(f"[{media_type}: {dest_path}]")
                         self.logger.debug("Downloaded attachment: {} -> {}", filename, dest_path)
                     else:
                         self.logger.warning("Attachment not found: {}", source_path)

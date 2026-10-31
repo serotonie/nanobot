@@ -703,6 +703,127 @@ class TestAttachmentsDir:
         assert ch._signal_attachments_dir() == Path.home() / "signal-attachments"
 
 
+class TestAssembleInboundContent:
+    @pytest.mark.asyncio
+    async def test_transcribes_audio_attachment(self, tmp_path, monkeypatch):
+        attachments_dir = tmp_path / "attachments"
+        attachments_dir.mkdir()
+        (attachments_dir / "audio-id").write_bytes(b"audio")
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        monkeypatch.setattr(
+            "nanobot.channels.signal.runtime.get_media_dir",
+            lambda _channel: media_dir,
+        )
+        ch = _make_channel(attachments_dir=str(attachments_dir))
+        transcribed_paths = []
+
+        async def transcribe_audio(path):
+            transcribed_paths.append(path)
+            return "Turn left at the next street."
+
+        monkeypatch.setattr(ch, "transcribe_audio", transcribe_audio)
+
+        content, media_paths = await ch._assemble_inbound_content(
+            sender_name=None,
+            sender_number="+19995550001",
+            message_text="",
+            attachments=[
+                {
+                    "id": "audio-id",
+                    "contentType": "audio/aac",
+                    "filename": "voice-note.aac",
+                }
+            ],
+            mentions=[],
+            is_group_message=False,
+            chat_id="+19995550001",
+        )
+
+        assert content == "[transcription: Turn left at the next street.]"
+        assert media_paths == [str(media_dir / "signal_voice-note.aac")]
+        assert transcribed_paths == [media_dir / "signal_voice-note.aac"]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_audio_attachment_when_transcription_is_empty(
+        self, tmp_path, monkeypatch
+    ):
+        attachments_dir = tmp_path / "attachments"
+        attachments_dir.mkdir()
+        (attachments_dir / "audio-id").write_bytes(b"audio")
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        monkeypatch.setattr(
+            "nanobot.channels.signal.runtime.get_media_dir",
+            lambda _channel: media_dir,
+        )
+        ch = _make_channel(attachments_dir=str(attachments_dir))
+
+        async def transcribe_audio(_path):
+            return ""
+
+        monkeypatch.setattr(ch, "transcribe_audio", transcribe_audio)
+
+        content, media_paths = await ch._assemble_inbound_content(
+            sender_name=None,
+            sender_number="+19995550001",
+            message_text="",
+            attachments=[
+                {
+                    "id": "audio-id",
+                    "contentType": "audio/aac",
+                    "filename": "voice-note.aac",
+                }
+            ],
+            mentions=[],
+            is_group_message=False,
+            chat_id="+19995550001",
+        )
+
+        assert content == f"[audio: {media_dir / 'signal_voice-note.aac'}]"
+        assert media_paths == [str(media_dir / "signal_voice-note.aac")]
+
+    @pytest.mark.asyncio
+    async def test_keeps_non_audio_attachment_unchanged(self, tmp_path, monkeypatch):
+        attachments_dir = tmp_path / "attachments"
+        attachments_dir.mkdir()
+        (attachments_dir / "image-id").write_bytes(b"image")
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        monkeypatch.setattr(
+            "nanobot.channels.signal.runtime.get_media_dir",
+            lambda _channel: media_dir,
+        )
+        ch = _make_channel(attachments_dir=str(attachments_dir))
+        transcription_calls = []
+
+        async def transcribe_audio(path):
+            transcription_calls.append(path)
+            return "unexpected"
+
+        monkeypatch.setattr(ch, "transcribe_audio", transcribe_audio)
+
+        content, media_paths = await ch._assemble_inbound_content(
+            sender_name=None,
+            sender_number="+19995550001",
+            message_text="",
+            attachments=[
+                {
+                    "id": "image-id",
+                    "contentType": "image/jpeg",
+                    "filename": "photo.jpg",
+                }
+            ],
+            mentions=[],
+            is_group_message=False,
+            chat_id="+19995550001",
+        )
+
+        assert content == f"[image: {media_dir / 'signal_photo.jpg'}]"
+        assert media_paths == [str(media_dir / "signal_photo.jpg")]
+        assert transcription_calls == []
+
+
 class TestHandleDataMessageDM:
     def _make_dm_channel(self, policy="open", allow_from=None) -> tuple[SignalChannel, list]:
         return _make_channel_with_capture(

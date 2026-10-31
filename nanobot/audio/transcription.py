@@ -1,14 +1,18 @@
 """Application-level audio transcription service.
 
 This module owns nanobot's transcription behavior: config resolution,
-legacy channel fallback, upload validation, temporary-file handling, and
+legacy channel fallback, upload validation, temporary-file handling, container
+normalization (raw AAC ADTS is remuxed to M4A), and
 dispatch to provider adapters. It deliberately does not know provider-specific
 HTTP details; those live in ``nanobot.providers.transcription``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +20,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.audio.adts import adts_to_m4a, is_adts
 from nanobot.audio.transcription_registry import (
     get_transcription_provider,
     resolve_transcription_provider,
@@ -213,4 +218,30 @@ async def transcribe_audio_file(
         language=config.language,
         model=config.model,
     )
-    return await provider.transcribe(file_path)
+    remuxed_path = await asyncio.to_thread(_remux_adts_to_m4a, Path(file_path))
+    try:
+        return await provider.transcribe(remuxed_path or file_path)
+    finally:
+        if remuxed_path:
+            shutil.rmtree(remuxed_path.parent, ignore_errors=True)
+
+
+def _remux_adts_to_m4a(path: Path) -> Path | None:
+    """Return a temporary M4A copy of a raw ADTS AAC file, or ``None`` if not applicable.
+
+    Providers such as Groq and OpenAI sniff the upload and reject raw ADTS
+    (e.g. Signal voice notes) regardless of the file name.
+    """
+    try:
+        with path.open("rb") as f:
+            if not is_adts(f.read(7)):
+                return None
+            data = path.read_bytes()
+        m4a = adts_to_m4a(data)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not remux ADTS audio {}: {}", path, exc)
+        return None
+    out_dir = Path(tempfile.mkdtemp(prefix="nanobot-audio-"))
+    out_path = out_dir / f"{path.stem}.m4a"
+    out_path.write_bytes(m4a)
+    return out_path

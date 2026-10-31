@@ -314,6 +314,47 @@ async def test_transcribe_audio_file_routes_openrouter_provider(audio_file: Path
 
 
 @pytest.mark.asyncio
+async def test_transcribe_audio_file_remuxes_adts_to_m4a_before_upload(tmp_path: Path) -> None:
+    payload = b"aac-frame"
+    length = 7 + len(payload)
+    adts = bytes((0xFF, 0xF1, 0x50, 0x40 | (length >> 11), (length >> 3) & 0xFF, ((length & 7) << 5) | 0x1F, 0xFC))
+    voice = tmp_path / "signal-voice.aac"
+    voice.write_bytes(adts + payload)
+    uploaded: dict[str, object] = {}
+
+    class StubGroq:
+        def __init__(self, **kwargs):
+            pass
+
+        async def transcribe(self, file_path: str | Path) -> str:
+            path = Path(file_path)
+            uploaded["path"] = path
+            uploaded["head"] = path.read_bytes()[4:8]
+            return "groq ok"
+
+    config = EffectiveTranscriptionConfig(
+        enabled=True,
+        provider="groq",
+        model="whisper-large-v3",
+        language=None,
+        api_key="gsk-test",
+        api_base="",
+        max_duration_sec=120,
+        max_upload_mb=25,
+    )
+
+    with patch("nanobot.providers.transcription.GroqTranscriptionProvider", StubGroq):
+        assert await transcribe_audio_file(voice, config) == "groq ok"
+
+    sent = uploaded["path"]
+    assert isinstance(sent, Path)
+    assert sent.name == "signal-voice.m4a"
+    assert uploaded["head"] == b"ftyp"
+    assert not sent.exists()
+    assert voice.read_bytes() == adts + payload
+
+
+@pytest.mark.asyncio
 async def test_transcribe_audio_file_routes_xiaomi_mimo_provider(audio_file: Path) -> None:
     captured: dict[str, object] = {}
 

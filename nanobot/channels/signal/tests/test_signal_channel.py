@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import pytest
 
@@ -1219,17 +1221,121 @@ class TestSend:
         assert "recipient" in params
 
     @pytest.mark.asyncio
-    async def test_send_with_media_includes_attachments(self):
+    async def test_send_with_media_includes_attachments(self, tmp_path):
         ch, client = self._make_send_channel()
+        path = tmp_path / "file.jpg"
+        data = b"\xff\xd8\xff\x00test\xff\xd9"
+        path.write_bytes(data)
         msg = OutboundMessage(
             channel="signal",
             chat_id="+19995550001",
             content="see attachment",
-            media=["/tmp/file.jpg"],
+            media=[str(path)],
         )
         await ch.send(msg)
         params = client.posts[0]["json"]["params"]
-        assert params.get("attachments") == ["/tmp/file.jpg"]
+        assert params["attachments"] == [
+            "data:image/jpeg;filename=file.jpg;base64," + base64.b64encode(data).decode("ascii")
+        ]
+        assert msg.media == [str(path)]
+
+    @pytest.mark.asyncio
+    async def test_send_media_only_preserves_bytes_mime_and_filenames(self, tmp_path):
+        ch, client = self._make_send_channel()
+        paths = [tmp_path / "photo ;,+=%.png", tmp_path / "file.unknown-extension"]
+        contents = [bytes(range(256)), b"\x00binary\xff"]
+        for path, data in zip(paths, contents):
+            path.write_bytes(data)
+        msg = OutboundMessage(
+            channel="signal", chat_id="grp==", content="", media=[str(p) for p in paths]
+        )
+        await ch.send(msg)
+        assert len(client.posts) == 1
+        params = client.posts[0]["json"]["params"]
+        assert params["message"] == ""
+        assert params["groupId"] == "grp=="
+        for uri, path, data, mime in zip(
+            params["attachments"], paths, contents, ["image/png", "application/octet-stream"]
+        ):
+            header, payload = uri.split(",", 1)
+            assert header.startswith(f"data:{mime};filename=")
+            assert header.endswith(";base64")
+            assert unquote(header.split("filename=", 1)[1].removesuffix(";base64")) == path.name
+            assert base64.b64decode(payload, validate=True) == data
+
+    @pytest.mark.asyncio
+    async def test_send_split_message_attaches_media_only_once(self, tmp_path):
+        ch, client = self._make_send_channel()
+        ch._MAX_MESSAGE_LEN = 12
+        path = tmp_path / "file.txt"
+        path.write_bytes(b"attachment")
+        msg = OutboundMessage(
+            channel="signal",
+            chat_id="+19995550001",
+            content="**head** middle and **tail**",
+            media=[str(path)],
+        )
+        await ch.send(msg)
+        assert len(client.posts) > 1
+        assert len(client.posts[0]["json"]["params"]["attachments"]) == 1
+        assert all("attachments" not in p["json"]["params"] for p in client.posts[1:])
+
+    @pytest.mark.asyncio
+    async def test_send_preserves_existing_data_uri(self):
+        ch, client = self._make_send_channel()
+        uri = "data:text/plain;filename=test.txt;base64,dGVzdA=="
+        await ch.send(
+            OutboundMessage(channel="signal", chat_id="+19995550001", content="", media=[uri])
+        )
+        assert client.posts[0]["json"]["params"]["attachments"] == [uri]
+
+    @pytest.mark.asyncio
+    async def test_send_expands_home_in_media_path(self, tmp_path, monkeypatch):
+        ch, client = self._make_send_channel()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "file.txt").write_bytes(b"test")
+        await ch.send(
+            OutboundMessage(
+                channel="signal", chat_id="+19995550001", content="", media=["~/file.txt"]
+            )
+        )
+        assert client.posts[0]["json"]["params"]["attachments"] == [
+            "data:text/plain;filename=file.txt;base64,dGVzdA=="
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_source", ["missing", "directory", "unreadable"])
+    async def test_send_invalid_media_fails_before_any_rpc(
+        self, tmp_path, monkeypatch, invalid_source
+    ):
+        ch, client = self._make_send_channel()
+        valid = tmp_path / "valid.jpg"
+        valid.write_bytes(b"valid")
+        invalid = tmp_path / invalid_source
+        error_type = FileNotFoundError
+        if invalid_source == "directory":
+            invalid.mkdir()
+            error_type = IsADirectoryError
+        elif invalid_source == "unreadable":
+            invalid.write_bytes(b"unreadable")
+            read_bytes = Path.read_bytes
+
+            def deny_read(path):
+                if path == invalid:
+                    raise PermissionError("attachment unreadable")
+                return read_bytes(path)
+
+            monkeypatch.setattr(Path, "read_bytes", deny_read)
+            error_type = PermissionError
+        msg = OutboundMessage(
+            channel="signal",
+            chat_id="+19995550001",
+            content="caption that must not be sent without its media",
+            media=[str(valid), str(invalid)],
+        )
+        with pytest.raises(error_type):
+            await ch.send(msg)
+        assert client.posts == []
 
     @pytest.mark.asyncio
     async def test_send_progress_message_does_not_stop_typing(self):

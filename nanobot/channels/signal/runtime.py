@@ -75,6 +75,8 @@ def _encode_signal_attachment(source: str) -> str:
     if source[:5].lower() == "data:":
         return source
     path = Path(source).expanduser()
+    if path.is_dir():
+        raise IsADirectoryError(f"Signal attachment is a directory: {path}")
     data = path.read_bytes()
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     filename = quote(path.name, safe="")

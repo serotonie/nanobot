@@ -1414,6 +1414,7 @@ class TestSend:
     async def test_send_expands_home_in_media_path(self, tmp_path, monkeypatch):
         ch, client = self._make_send_channel()
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         (tmp_path / "file.txt").write_bytes(b"test")
         await ch.send(
             OutboundMessage(

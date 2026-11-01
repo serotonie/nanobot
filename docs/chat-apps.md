@@ -1070,6 +1070,21 @@ signal-cli -a +1234567890 daemon --http localhost:8080
 > - `attachmentsDir`: Override the directory where signal-cli stores inbound attachments. Defaults to `~/.local/share/signal-cli/attachments` (the Linux default). Set this if signal-cli runs with a custom `XDG_DATA_HOME` or on macOS/Windows.
 > - `groupMessageBufferSize`: Number of recent group messages kept for context (default `20`, must be > 0).
 
+**Media and separate containers**
+
+Outbound media files are read by Nanobot and sent to signal-cli as base64 data URIs,
+including their MIME type and filename. The daemon does not need access to Nanobot's
+workspace or media paths. Use a signal-cli version that supports data URI attachments
+(verified with 0.14.9). A missing or unreadable local file fails the send explicitly;
+there is no fallback to sending only the caption. Attachments are included only in
+the first chunk of a split message.
+
+Inbound media still requires access to signal-cli's attachment directory: when running
+in separate containers, mount that directory into Nanobot and set `attachmentsDir`
+to the path **inside the Nanobot container**. Keep this inbound mount when upgrading.
+Outbound data URI encoding buffers the files in memory and adds roughly 33% to their
+size in the JSON-RPC request.
+
 **3. Run**
 
 ```bash

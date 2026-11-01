@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import re
 import shutil
 import unicodedata
@@ -11,6 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict, cast
+from urllib.parse import quote
 
 import httpx
 from pydantic import Field, computed_field, field_validator
@@ -65,6 +68,18 @@ def _as_json_object(value: object) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return cast(dict[str, Any], value)
     return None
+
+
+def _encode_signal_attachment(source: str) -> str:
+    """Send file contents, not paths that may be inaccessible to the daemon."""
+    if source[:5].lower() == "data:":
+        return source
+    path = Path(source).expanduser()
+    data = path.read_bytes()
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    filename = quote(path.name, safe="")
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};filename={filename};base64,{encoded}"
 
 
 def _as_json_object_list(value: object) -> list[dict[str, Any]]:
@@ -546,6 +561,10 @@ class SignalChannel(BaseChannel):
             if not plain_text and not msg.media:
                 return
             recipient_params = self._recipient_params(msg.chat_id)
+            attachments = [
+                await asyncio.to_thread(_encode_signal_attachment, source)
+                for source in msg.media
+            ]
 
             chunks = split_message(plain_text, self._MAX_MESSAGE_LEN) if plain_text else [""]
             chunk_styles = _partition_styles(plain_text, chunks, text_styles)
@@ -554,8 +573,8 @@ class SignalChannel(BaseChannel):
                 if chunk_styles[i]:
                     params["textStyle"] = chunk_styles[i]
                 params.update(recipient_params)
-                if msg.media and i == 0:
-                    params["attachments"] = msg.media
+                if attachments and i == 0:
+                    params["attachments"] = attachments
 
                 response = await self._send_request("send", params)
 

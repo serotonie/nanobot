@@ -1,0 +1,77 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: HKUDS/nanobot
+
+jobs:
+  sync:
+    name: Sync latest stable upstream release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # A PAT is needed so the sync PR triggers CI and workflow files can be pushed.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Find latest stable upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # /releases/latest excludes prereleases and drafts.
+          tag=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch upstream tag
+        id: fetch
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/upstream-$TAG"
+          if git merge-base --is-ancestor "upstream-$TAG" origin/main; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --heads origin "sync/upstream-$TAG" >/dev/null; then
+            echo "Sync branch for $TAG already exists."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge release into main
+        if: steps.fetch.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="sync/upstream-$TAG"
+          git checkout -b "$branch" origin/main
+
+          if git merge --no-ff -m "Sync upstream $TAG" "upstream-$TAG"; then
+            body="Automatic merge of upstream release [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG)."
+          else
+            # Push the conflict markers so the merge can be resolved in the PR branch.
+            git add -A
+            git commit -m "Sync upstream $TAG (conflicts to resolve)"
+            body="Merge of upstream release [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG) has **conflicts**. Resolve them on this branch before merging."
+          fi
+
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Sync upstream $TAG" --body "$body"

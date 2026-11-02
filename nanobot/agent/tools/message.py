@@ -11,7 +11,14 @@ from loguru import logger
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_context
 from nanobot.agent.tools.path_utils import resolve_workspace_path
-from nanobot.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
+from nanobot.agent.tools.schema import (
+    ArraySchema,
+    BooleanSchema,
+    IntegerSchema,
+    ObjectSchema,
+    StringSchema,
+    tool_parameters_schema,
+)
 from nanobot.bus.delivery import DeliveryRequest
 from nanobot.bus.events import OutboundMessage
 from nanobot.config.paths import get_workspace_path
@@ -20,6 +27,27 @@ from nanobot.security.workspace_access import current_tool_workspace
 _CURRENT_MESSAGE_SENDS: ContextVar[set[tuple[str, str]] | None] = ContextVar(
     "message_sends",
     default=None,
+)
+
+_REACTION_SCHEMA = ObjectSchema(
+    emoji=StringSchema("Reaction emoji (one Unicode grapheme).", min_length=1),
+    target_author=StringSchema(
+        "Signal number or UUID of the original message author.", min_length=1,
+    ),
+    target_timestamp=IntegerSchema(
+        description="Original Signal message timestamp in milliseconds.",
+        minimum=1,
+        maximum=2**63 - 1,
+    ),
+    remove=BooleanSchema(description="Remove this reaction instead of adding it.", default=False),
+    required=["emoji"],
+    additional_properties=False,
+    description=(
+        "Signal only: add or remove a reaction. Send content='' and no media/buttons. "
+        "Omit both target_author and target_timestamp to react to the current incoming message "
+        "(or the original message referenced by an incoming reaction). "
+        "For another message or chat, supply both target fields."
+    ),
 )
 
 
@@ -58,6 +86,7 @@ def capture_message_deliveries() -> Generator[set[tuple[str, str]], None, None]:
             ArraySchema(StringSchema("Button label")),
             description="Optional: inline keyboard buttons as list of rows, each row is list of button labels.",
         ),
+        reaction=_REACTION_SCHEMA,
         required=["content"],
     )
 )
@@ -119,6 +148,7 @@ class MessageTool(Tool):
             "For normal replies, including scheduled reminders and reports, answer directly; "
             "the final reply is delivered to the current chat automatically. "
             "Use this tool to deliver generated images via media."
+            " On Signal, use reaction to add or remove an emoji reaction instead of sending text."
         )
 
     def _resolve_media(self, media: list[str]) -> list[str]:
@@ -146,6 +176,7 @@ class MessageTool(Tool):
         message_id: str | None = None,
         media: list[str] | None = None,
         buttons: Any = None,
+        reaction: Any = None,
         **kwargs: Any,
     ) -> str:
         from nanobot.utils.helpers import strip_think
@@ -219,6 +250,50 @@ class MessageTool(Tool):
                 return ToolResult.error(f"Error: media path is not allowed: {str(e)}")
 
         metadata = dict(default_metadata) if same_target else {}
+        if reaction is not None:
+            if channel != "signal":
+                return ToolResult.error("Error: reactions are supported only on Signal")
+            errors = _REACTION_SCHEMA.validate_value(reaction, "reaction")
+            if errors:
+                return ToolResult.error(f"Error: {'; '.join(errors)}")
+            reaction_data = dict(cast(dict[str, Any], reaction))
+            if content or media or button_rows:
+                return ToolResult.error(
+                    "Error: send reactions separately with content='' and no media/buttons"
+                )
+            has_author = "target_author" in reaction_data
+            has_timestamp = "target_timestamp" in reaction_data
+            if has_author != has_timestamp:
+                return ToolResult.error(
+                    "Error: supply both reaction target_author and target_timestamp, or omit both"
+                )
+            if not has_author:
+                if not same_target:
+                    return ToolResult.error(
+                        "Error: reactions to another chat require target_author and target_timestamp"
+                    )
+                incoming_reaction = default_metadata.get("reaction")
+                if isinstance(incoming_reaction, dict):
+                    target = cast(dict[str, Any], incoming_reaction)
+                    reaction_data["target_author"] = target.get("target_author")
+                    reaction_data["target_timestamp"] = target.get("target_timestamp")
+                else:
+                    reaction_data["target_author"] = default_metadata.get("sender_number")
+                    reaction_data["target_timestamp"] = default_metadata.get("timestamp")
+            errors = _REACTION_SCHEMA.validate_value(reaction_data, "reaction")
+            if errors:
+                return ToolResult.error(
+                    f"Error: cannot resolve Signal reaction target: {'; '.join(errors)}"
+                )
+            target_author = cast(str, reaction_data["target_author"])
+            if (
+                not reaction_data["emoji"].strip()
+                or not target_author.strip()
+            ):
+                return ToolResult.error("Error: reaction emoji and target_author must not be blank")
+            reaction_data["target_author"] = target_author.strip()
+            reaction_data["target_timestamp"] = int(cast(int, reaction_data["target_timestamp"]))
+            metadata["signal_reaction"] = reaction_data
         if message_id:
             metadata["message_id"] = message_id
         if media:
@@ -255,6 +330,7 @@ class MessageTool(Tool):
                 else ""
             )
             action = "queued" if msg.delivery is not None else "sent"
-            return f"Message {action} to {channel}:{chat_id}{media_info}{button_info}"
+            kind = "Reaction" if reaction is not None else "Message"
+            return f"{kind} {action} to {channel}:{chat_id}{media_info}{button_info}"
         except Exception as e:
             return ToolResult.error(f"Error sending message: {str(e)}")

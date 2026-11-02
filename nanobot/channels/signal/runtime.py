@@ -97,6 +97,41 @@ class _BufferedMessage(TypedDict):
     timestamp: int | None
 
 
+class _SignalReaction(TypedDict):
+    emoji: str
+    target_author: str
+    target_timestamp: int
+    remove: bool
+
+
+def _parse_signal_reaction(value: object) -> _SignalReaction:
+    reaction = _as_json_object(value)
+    if reaction is None:
+        raise ValueError("Signal reaction must be an object")
+    emoji = reaction.get("emoji")
+    author = reaction.get("target_author")
+    timestamp = reaction.get("target_timestamp")
+    remove = reaction.get("remove", False)
+    if not isinstance(emoji, str) or not emoji.strip():
+        raise ValueError("Signal reaction requires a non-empty emoji")
+    if not isinstance(author, str) or not author.strip():
+        raise ValueError("Signal reaction requires a target author")
+    if (
+        not isinstance(timestamp, int)
+        or isinstance(timestamp, bool)
+        or not 0 < timestamp <= 2**63 - 1
+    ):
+        raise ValueError("Signal reaction requires a positive target timestamp in milliseconds")
+    if not isinstance(remove, bool):
+        raise ValueError("Signal reaction remove must be a boolean")
+    return {
+        "emoji": emoji,
+        "target_author": author.strip(),
+        "target_timestamp": timestamp,
+        "remove": remove,
+    }
+
+
 def _utf16_len(s: str) -> int:
     """UTF-16 code-unit length, matching Signal BodyRange semantics."""
     return len(s.encode("utf-16-le")) // 2
@@ -559,6 +594,24 @@ class SignalChannel(BaseChannel):
             raise ChannelNotReadyError("Signal client not connected")
         is_progress_message = isinstance(msg.event, ProgressEvent)
         try:
+            if "signal_reaction" in msg.metadata:
+                reaction = _parse_signal_reaction(msg.metadata["signal_reaction"])
+                if msg.content or msg.media or msg.buttons:
+                    raise ValueError("Send Signal reactions separately from text, media or buttons")
+                response = await self._send_request(
+                    "sendReaction",
+                    {
+                        **self._recipient_params(msg.chat_id),
+                        "emoji": reaction["emoji"],
+                        "targetAuthor": reaction["target_author"],
+                        "targetTimestamp": reaction["target_timestamp"],
+                        "remove": reaction["remove"],
+                    },
+                )
+                if "error" in response:
+                    raise RuntimeError(f"signal-cli sendReaction failed: {response['error']}")
+                self.logger.debug("Signal reaction sent to {}", msg.chat_id)
+                return
             plain_text, text_styles = _markdown_to_signal(msg.content)
             if not plain_text and not msg.media:
                 return
@@ -734,11 +787,31 @@ class SignalChannel(BaseChannel):
             list(data_message.keys()),
         )
 
-        if data_message.get("reaction"):
-            self.logger.debug(
-                "Ignoring reaction message from {}: {}", sender_number, data_message["reaction"]
+        reaction: _SignalReaction | None = None
+        if "reaction" in data_message:
+            raw_reaction = _as_json_object(data_message["reaction"])
+            if raw_reaction is None:
+                raise ValueError("Signal reaction must be an object")
+            reaction = _parse_signal_reaction(
+                {
+                    "emoji": raw_reaction.get("emoji"),
+                    "target_author": (
+                        raw_reaction.get("targetAuthorNumber")
+                        or raw_reaction.get("targetAuthorUuid")
+                        or raw_reaction.get("targetAuthor")
+                    ),
+                    "target_timestamp": raw_reaction.get("targetSentTimestamp"),
+                    "remove": raw_reaction.get("isRemove", False),
+                }
             )
-            return
+            action = "removed" if reaction["remove"] else "added"
+            message_text = (
+                f"[Signal reaction: {action} {reaction['emoji']} "
+                f"on message {reaction['target_timestamp']} "
+                f"by {reaction['target_author']}]"
+            )
+            attachments = []
+            mentions = []
         if not message_text and not attachments:
             self.logger.debug("Ignoring empty message from {}", sender_number)
             return
@@ -757,6 +830,7 @@ class SignalChannel(BaseChannel):
             mentions=mentions,
             sender_name=sender_name,
             timestamp=timestamp,
+            reaction_target_author=reaction["target_author"] if reaction else None,
         )
         if not allowed:
             # Mirror Slack: let denied DMs reach the base-class
@@ -796,6 +870,7 @@ class SignalChannel(BaseChannel):
                     "sender_number": sender_number,
                     "is_group": is_group_message,
                     "group_id": group_id,
+                    **({"reaction": reaction} if reaction else {}),
                 },
                 is_dm=not is_group_message,
             )
@@ -814,6 +889,7 @@ class SignalChannel(BaseChannel):
         mentions: list[dict[str, Any]],
         sender_name: str | None,
         timestamp: int | None,
+        reaction_target_author: str | None = None,
     ) -> tuple[bool, str]:
         if is_group_message:
             chat_id = group_id or sender_number
@@ -841,7 +917,12 @@ class SignalChannel(BaseChannel):
             )
 
             is_command = bool(message_text and message_text.strip().startswith("/"))
-            if not is_command and not self._should_respond_in_group(message_text, mentions):
+            targets_bot = self._id_matches_account(reaction_target_author)
+            if (
+                not is_command
+                and not targets_bot
+                and not self._should_respond_in_group(message_text, mentions)
+            ):
                 self.logger.info(
                     "Ignoring group message (require_mention: {})",
                     self.config.group.require_mention,

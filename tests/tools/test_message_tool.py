@@ -146,6 +146,142 @@ async def test_message_tool_does_not_inherit_metadata_for_cross_target() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("remove", [False, True])
+async def test_message_tool_reacts_to_current_signal_message(remove) -> None:
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send)
+    with request_context(RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        metadata={"sender_number": "+19995550001", "timestamp": 1234},
+    )):
+        result = await tool.execute(content="", reaction={"emoji": "👍", "remove": remove})
+
+    assert result == "Reaction sent to signal:+19995550001"
+    assert sent[0].content == ""
+    assert sent[0].metadata["signal_reaction"] == {
+        "emoji": "👍",
+        "target_author": "+19995550001",
+        "target_timestamp": 1234,
+        "remove": remove,
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_tool_reacts_to_original_message_not_reaction_event() -> None:
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send)
+    with request_context(RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        metadata={
+            "sender_number": "+19995550001",
+            "timestamp": 1234,
+            "reaction": {
+                "emoji": "👍",
+                "target_author": "+10000000000",
+                "target_timestamp": 999,
+                "remove": False,
+            },
+        },
+    )):
+        await tool.execute(content="", reaction={"emoji": "❤️"})
+
+    assert sent[0].metadata["signal_reaction"] == {
+        "emoji": "❤️",
+        "target_author": "+10000000000",
+        "target_timestamp": 999,
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_tool_reaction_explicit_cross_chat_target() -> None:
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send)
+    with request_context(RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        metadata={"sender_number": "+19995550001", "timestamp": 1234},
+    )):
+        await tool.execute(
+            content="",
+            chat_id="group==",
+            reaction={"emoji": "👍", "target_author": "author-uuid", "target_timestamp": 999},
+        )
+    assert sent[0].chat_id == "group=="
+    assert sent[0].metadata == {
+        "signal_reaction": {
+            "emoji": "👍", "target_author": "author-uuid", "target_timestamp": 999,
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel", "content", "reaction", "extra", "error"),
+    [
+        ("telegram", "", {"emoji": "👍"}, {}, "only on Signal"),
+        ("signal", "hi", {"emoji": "👍"}, {}, "separately"),
+        ("signal", "", {"emoji": "👍"}, {"buttons": [["hi"]]}, "separately"),
+        ("signal", "", {"emoji": "👍"}, {"media": ["/tmp/photo.png"]}, "separately"),
+        ("signal", "", {"emoji": "👍"}, {"chat_id": "other=="}, "another chat"),
+        ("signal", "", {"emoji": "👍", "target_author": "author"}, {}, "supply both"),
+        ("signal", "", {"emoji": "👍", "target_timestamp": 999}, {}, "supply both"),
+        ("signal", "", {"emoji": " "}, {}, "must not be blank"),
+        ("signal", "", {"emoji": "👍", "remove": "yes"}, {}, "boolean"),
+        (
+            "signal", "",
+            {"emoji": "👍", "target_author": "author", "target_timestamp": True},
+            {}, "integer",
+        ),
+    ],
+)
+async def test_message_tool_rejects_invalid_reactions(
+    channel, content, reaction, extra, error,
+) -> None:
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send)
+    with request_context(RequestContext(
+        channel=channel,
+        chat_id="+19995550001",
+        metadata={"sender_number": "+19995550001", "timestamp": 1234},
+    )):
+        result = await tool.execute(content=content, reaction=reaction, **extra)
+    assert result.startswith("Error:")
+    assert error in result
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_message_tool_does_not_guess_missing_reaction_target() -> None:
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send, default_channel="signal", default_chat_id="+19995550001")
+    result = await tool.execute(content="", reaction={"emoji": "👍"})
+    assert result.startswith("Error: cannot resolve Signal reaction target")
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_message_tool_resolves_relative_media_paths() -> None:
     sent: list[OutboundMessage] = []
 

@@ -62,7 +62,12 @@ class DeliveryOutbox:
 
     def record(self, msg: OutboundMessage) -> None:
         """Commit before queue acceptance. Do not store runtime events or empty replies."""
-        if msg.delivery is None or msg.event is not None or not (msg.content.strip() or msg.media):
+        has_reaction = msg.channel == "signal" and "signal_reaction" in msg.metadata
+        if (
+            msg.delivery is None
+            or msg.event is not None
+            or not (msg.content.strip() or msg.media or has_reaction)
+        ):
             return
         if msg.delivery_id is not None:
             return

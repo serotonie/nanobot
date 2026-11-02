@@ -4,14 +4,18 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import unquote
 
 import pytest
 
+from nanobot.agent.tools.context import RequestContext, request_context
+from nanobot.agent.tools.message import MessageTool
+from nanobot.bus.delivery import DELIVERY_RUN_META, DeliveryRequest
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
+from nanobot.channels.outbox import DeliveryOutbox
 from nanobot.channels.signal.runtime import (
     SignalChannel,
     SignalConfig,
@@ -937,11 +941,66 @@ class TestHandleDataMessageDM:
         assert handled == []
 
     @pytest.mark.asyncio
-    async def test_reaction_message_ignored(self):
+    @pytest.mark.parametrize("remove", [False, True])
+    @pytest.mark.parametrize("author_field", ["targetAuthorNumber", "targetAuthorUuid", "targetAuthor"])
+    async def test_reaction_forwarded(self, remove, author_field):
         ch, handled = self._make_dm_channel()
-        params = _dm_envelope(reaction={"emoji": "👍", "targetTimestamp": 999})
+        author = "+10000000000" if author_field != "targetAuthorUuid" else "bot-uuid"
+        params = _dm_envelope(
+            message="",
+            reaction={
+                "emoji": "👍",
+                author_field: author,
+                "targetSentTimestamp": 999,
+                "isRemove": remove,
+            },
+        )
         await ch._handle_receive_notification(params)
+        assert len(handled) == 1
+        msg = handled[0]
+        action = "removed" if remove else "added"
+        assert msg["content"] == f"[Signal reaction: {action} 👍 on message 999 by {author}]"
+        assert msg["chat_id"] == "+19995550001"
+        assert msg["metadata"]["reaction"] == {
+            "emoji": "👍",
+            "target_author": author,
+            "target_timestamp": 999,
+            "remove": remove,
+        }
+        assert msg["media"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"dm_enabled": False},
+            {"dm_policy": "allowlist", "dm_allow_from": ["+18885550001"]},
+        ],
+    )
+    async def test_reactions_respect_dm_policy(self, overrides):
+        ch, handled = _make_channel_with_capture(**overrides)
+        ch._http = _FakeHTTPClient()
+        await ch._handle_receive_notification(
+            _dm_envelope(
+                message="",
+                reaction={
+                    "emoji": "👍",
+                    "targetAuthorNumber": "+10000000000",
+                    "targetSentTimestamp": 999,
+                },
+            )
+        )
         assert handled == []
+
+    @pytest.mark.asyncio
+    async def test_malformed_reaction_is_logged_without_publishing(self):
+        ch, handled = self._make_dm_channel()
+        ch.logger = MagicMock()
+        await ch._handle_receive_notification(
+            _dm_envelope(message="", reaction={"emoji": "👍", "targetSentTimestamp": True})
+        )
+        assert handled == []
+        ch.logger.opt.return_value.error.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_empty_message_ignored(self):
@@ -1261,6 +1320,118 @@ class TestCommandHandling:
         assert forwarded == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incoming_reaction", [False, True])
+async def test_signal_receive_to_message_tool_to_rpc(incoming_reaction):
+    ch = _make_channel()
+    ch._start_typing = AsyncMock()
+    client = _FakeHTTPClient()
+    ch._http = client
+    reaction = (
+        {
+            "emoji": "👍",
+            "targetAuthorNumber": "+10000000000",
+            "targetSentTimestamp": 999,
+            "isRemove": False,
+        }
+        if incoming_reaction else None
+    )
+    await ch._handle_receive_notification(
+        _dm_envelope(message="" if incoming_reaction else "hello", reaction=reaction)
+    )
+    inbound = ch.bus.inbound.get_nowait()
+    tool = MessageTool(send_callback=ch.bus.publish_outbound)
+    with request_context(RequestContext(
+        channel=inbound.channel,
+        chat_id=inbound.chat_id,
+        metadata=inbound.metadata,
+    )):
+        result = await tool.execute(content="", reaction={"emoji": "❤️"})
+    assert not result.startswith("Error:")
+    await ch.send(ch.bus.outbound.get_nowait())
+    assert len(client.posts) == 1
+    payload = client.posts[0]["json"]
+    assert payload["method"] == "sendReaction"
+    assert payload["params"] == {
+        "recipient": ["+19995550001"],
+        "emoji": "❤️",
+        "targetAuthor": "+10000000000" if incoming_reaction else "+19995550001",
+        "targetTimestamp": 999 if incoming_reaction else 1000,
+        "remove": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scheduled_signal_reaction_survives_queue_restart(tmp_path):
+    bus = MessageBus()
+    outbox_path = tmp_path / "outbox.sqlite3"
+    outbox = DeliveryOutbox(outbox_path)
+    bus.outbound_recorder = outbox.record
+    tool = MessageTool(send_callback=bus.publish_outbound)
+    with request_context(RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        session_key="signal:+19995550001",
+        metadata={DELIVERY_RUN_META: "scheduled-run"},
+    )):
+        result = await tool.execute(
+            content="",
+            reaction={
+                "emoji": "👍",
+                "target_author": "+19995550001",
+                "target_timestamp": 999,
+            },
+        )
+    assert result == "Reaction queued to signal:+19995550001"
+    restored = DeliveryOutbox(outbox_path).ready()
+    assert len(restored) == 1
+    assert restored[0].delivery == DeliveryRequest(
+        "scheduled-run", "signal:+19995550001", None,
+    )
+    ch = _make_channel()
+    client = _FakeHTTPClient()
+    ch._http = client
+    await ch.send(restored[0])
+    assert client.posts[0]["json"]["method"] == "sendReaction"
+    assert client.posts[0]["json"]["params"]["targetTimestamp"] == 999
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "target_author", "delivered"),
+    [
+        ({}, "+10000000000", True),
+        ({}, "+18885550001", False),
+        ({"require_mention": False}, "+18885550001", True),
+        ({"group_enabled": False}, "+10000000000", False),
+        (
+            {"group_policy": "allowlist", "group_allow_from": ["other-group=="]},
+            "+10000000000",
+            False,
+        ),
+    ],
+)
+async def test_group_reactions_follow_access_and_addressing_policy(
+    overrides, target_author, delivered,
+):
+    ch, handled = _make_channel_with_capture(
+        **{"group_enabled": True, "require_mention": True, **overrides},
+    )
+    params = _group_envelope(group_id="grp==", message="", use_v2=True)
+    params["envelope"]["dataMessage"]["reaction"] = {
+        "emoji": "👍",
+        "targetAuthorNumber": target_author,
+        "targetSentTimestamp": 999,
+        "isRemove": False,
+    }
+    await ch._handle_receive_notification(params)
+    assert bool(handled) is delivered
+    if delivered:
+        assert handled[0]["chat_id"] == "grp=="
+        assert handled[0]["metadata"]["is_group"] is True
+        assert "[Bob]: [Signal reaction: added 👍" in handled[0]["content"]
+
+
 class TestSend:
     def _make_send_channel(self) -> tuple[SignalChannel, _FakeHTTPClient]:
         ch = _make_channel()
@@ -1277,6 +1448,80 @@ class TestSend:
         payload = client.posts[0]["json"]
         assert payload["method"] == "send"
         assert payload["params"]["message"] == "hello"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chat_id", ["+19995550001", "grp=="])
+    @pytest.mark.parametrize("remove", [False, True])
+    async def test_send_reaction_posts_rpc(self, chat_id, remove):
+        ch, client = self._make_send_channel()
+        await ch.send(
+            OutboundMessage(
+                channel="signal",
+                chat_id=chat_id,
+                content="",
+                metadata={
+                    "signal_reaction": {
+                        "emoji": "👍",
+                        "target_author": "+19995550001",
+                        "target_timestamp": 999,
+                        "remove": remove,
+                    },
+                },
+            )
+        )
+        assert len(client.posts) == 1
+        payload = client.posts[0]["json"]
+        assert payload["method"] == "sendReaction"
+        recipient = {"groupId": chat_id} if chat_id == "grp==" else {"recipient": [chat_id]}
+        assert payload["params"] == {
+            **recipient,
+            "emoji": "👍",
+            "targetAuthor": "+19995550001",
+            "targetTimestamp": 999,
+            "remove": remove,
+        }
+
+    @pytest.mark.asyncio
+    async def test_send_reaction_rpc_failure_propagates(self):
+        ch, client = self._make_send_channel()
+        client._response = _FakeResponse(body={"error": {"message": "invalid emoji"}})
+        with pytest.raises(RuntimeError, match="signal-cli sendReaction failed"):
+            await ch.send(
+                OutboundMessage(
+                    channel="signal",
+                    chat_id="+19995550001",
+                    content="",
+                    metadata={
+                        "signal_reaction": {
+                            "emoji": "not-an-emoji",
+                            "target_author": "+19995550001",
+                            "target_timestamp": 999,
+                        },
+                    },
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_text_reply_to_incoming_reaction_remains_text(self):
+        ch, client = self._make_send_channel()
+        await ch.send(
+            OutboundMessage(
+                channel="signal",
+                chat_id="+19995550001",
+                content="Thanks!",
+                metadata={
+                    "reaction": {
+                        "emoji": "👍",
+                        "target_author": "+10000000000",
+                        "target_timestamp": 999,
+                        "remove": False,
+                    },
+                },
+            )
+        )
+        assert len(client.posts) == 1
+        assert client.posts[0]["json"]["method"] == "send"
+        assert client.posts[0]["json"]["params"]["message"] == "Thanks!"
 
     @pytest.mark.asyncio
     async def test_send_with_markdown_includes_text_styles(self):

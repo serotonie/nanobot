@@ -1070,6 +1070,12 @@ signal-cli -a +1234567890 daemon --http localhost:8080
 > - `attachmentsDir`: Override the directory where signal-cli stores inbound attachments. Defaults to `~/.local/share/signal-cli/attachments` (the Linux default). Set this if signal-cli runs with a custom `XDG_DATA_HOME` or on macOS/Windows.
 > - `groupMessageBufferSize`: Number of recent group messages kept for context (default `20`, must be > 0).
 
+**Reactions (tapbacks)**
+
+Incoming reaction additions and removals are forwarded to the agent with the emoji, original message author and original message timestamp. They follow the same DM and group access policies as text messages. With `group.requireMention: true`, a reaction to the bot's own message counts as addressing the bot; reactions to other participants remain in the group context buffer without triggering a reply.
+
+The agent can add a reaction with the `message` tool: `{"content": "", "reaction": {"emoji": "👍"}}`. On a Signal turn this targets the current incoming message, or the original message referenced by an incoming reaction. To remove the bot's reaction, send the same emoji with `"remove": true`. To target another message, provide both `target_author` (Signal phone number or UUID) and `target_timestamp` (original message timestamp in milliseconds) inside `reaction`; these are required for cross-chat sends. Reactions cannot be combined with text, attachments or buttons. Sending uses signal-cli's `sendReaction` JSON-RPC method and requires no additional channel configuration.
+
 **Media and separate containers**
 
 Outbound media files are read by Nanobot and sent to signal-cli as base64 data URIs,

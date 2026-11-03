@@ -1223,6 +1223,82 @@ def _fake_streaming_client(lines: list[str], *, status_code: int = 200) -> Magic
     return http
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [False, True])
+async def test_native_quoted_reply_through_message_tool(group):
+    ch = _make_channel(group_enabled=group, require_mention=False)
+    client = _FakeHTTPClient()
+    ch._http = client  # type: ignore[assignment]
+    ch._start_typing = AsyncMock()  # type: ignore[method-assign]
+    params = _group_envelope(message="Original") if group else _dm_envelope(message="Original")
+    params["envelope"]["dataMessage"]["quote"] = {
+        "id": 42, "author": "+10000000000", "text": "Earlier message",
+    }
+    await ch._handle_receive_notification(params)
+    inbound = ch.bus.inbound.get_nowait()
+    assert "Earlier message" in inbound.content
+    assert "Original" in inbound.content
+    tool = MessageTool(send_callback=ch.bus.publish_outbound)
+    assert "quote" in tool.parameters["properties"]
+    with request_context(RequestContext(
+        channel=inbound.channel, chat_id=inbound.chat_id, metadata=inbound.metadata,
+    )):
+        result = await tool.execute(content="My reply", quote={})
+    assert not result.startswith("Error:")
+    await ch.send(ch.bus.outbound.get_nowait())
+    rpc = client.posts[0]["json"]
+    assert rpc["method"] == "send"
+    assert rpc["params"] == {
+        "message": "My reply",
+        **({"groupId": "group123=="} if group else {"recipient": ["+19995550001"]}),
+        "quoteTimestamp": 2000 if group else 1000,
+        "quoteAuthor": "+19995550001",
+        "quoteMessage": "Original",
+    }
+
+
+@pytest.mark.asyncio
+async def test_incoming_quote_does_not_automatically_requote_original():
+    ch = _make_channel()
+    client = _FakeHTTPClient()
+    ch._http = client  # type: ignore[assignment]
+    await ch.send(OutboundMessage(
+        channel="signal", chat_id="+19995550001", content="Plain reply",
+        metadata={"quote": {"id": 42, "author": "+10000000000", "text": "Earlier"}},
+    ))
+    assert client.posts[0]["json"]["params"] == {
+        "recipient": ["+19995550001"], "message": "Plain reply",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["", "A long reply with several chunks"])
+async def test_native_quote_and_media_only_attached_to_first_chunk(tmp_path, content):
+    ch = _make_channel()
+    client = _FakeHTTPClient()
+    ch._http = client  # type: ignore[assignment]
+    ch._MAX_MESSAGE_LEN = 10
+    path = tmp_path / "note.txt"
+    path.write_text("attachment")
+    await ch.send(OutboundMessage(
+        channel="signal", chat_id="+19995550001", content=content,
+        media=[str(path)],
+        metadata={"signal_quote": {
+            "target_author": "author-uuid", "target_timestamp": 42, "text": "Earlier",
+        }},
+    ))
+    assert len(client.posts) > 1 if content else len(client.posts) == 1
+    first = client.posts[0]["json"]["params"]
+    assert first["quoteTimestamp"] == 42
+    assert first["quoteAuthor"] == "author-uuid"
+    assert first["quoteMessage"] == "Earlier"
+    assert len(first["attachments"]) == 1
+    for post in client.posts[1:]:
+        assert not {"quoteTimestamp", "quoteAuthor", "quoteMessage", "attachments"} & (
+            post["json"]["params"].keys()
+        )
+
+
 class TestLifecycle:
     @pytest.mark.asyncio
     async def test_start_returns_early_when_phone_missing(self):

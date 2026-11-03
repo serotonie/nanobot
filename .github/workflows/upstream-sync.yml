@@ -1,4 +1,4 @@
-name: Upstream Sync
+name: Upstream Prerelease Check
 
 on:
   schedule:
@@ -6,72 +6,108 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: upstream-sync
+  group: upstream-prerelease-check
   cancel-in-progress: false
 
 permissions:
   contents: write
-  pull-requests: write
+  actions: write
+  issues: write
 
 env:
   UPSTREAM_REPO: HKUDS/nanobot
+  TARGET_BRANCH: main
 
 jobs:
-  sync:
-    name: Sync latest stable upstream release
+  check:
+    name: Test latest upstream prerelease against fork
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # A PAT is needed so the sync PR triggers CI and workflow files can be pushed.
+          ref: ${{ env.TARGET_BRANCH }}
+          # A PAT is needed so upstream workflow file changes can be pushed.
           token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
-      - name: Find latest stable upstream release
+      - name: Find newest upstream release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # /releases/latest excludes prereleases and drafts.
-          tag=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          read -r tag pre < <(gh api "repos/$UPSTREAM_REPO/releases" \
+            --jq '[.[] | select(.draft == false)][0] | "\(.tag_name) \(.prerelease)"')
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Fetch upstream tag
-        id: fetch
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
-          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/upstream-$TAG"
-          if git merge-base --is-ancestor "upstream-$TAG" origin/main; then
+          if [ "$pre" != "true" ]; then
+            echo "Newest release $tag is stable; nothing to check."
             echo "needed=false" >> "$GITHUB_OUTPUT"
-          elif git ls-remote --exit-code --heads origin "sync/upstream-$TAG" >/dev/null; then
-            echo "Sync branch for $TAG already exists."
+          elif git ls-remote --exit-code --tags origin "refs/tags/prerelease-checked/$tag" >/dev/null; then
+            echo "Prerelease $tag already checked."
             echo "needed=false" >> "$GITHUB_OUTPUT"
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Merge release into main
-        if: steps.fetch.outputs.needed == 'true'
+      - name: Merge prerelease into a test branch
+        id: merge
+        if: steps.release.outputs.needed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          branch="sync/upstream-$TAG"
-          git checkout -b "$branch" origin/main
-
-          if git merge --no-ff -m "Sync upstream $TAG" "upstream-$TAG"; then
-            body="Automatic merge of upstream release [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG)."
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/upstream-$TAG"
+          git checkout -b "prerelease-check/$TAG"
+          if git merge --no-ff -m "Test upstream $TAG" "upstream-$TAG"; then
+            git push origin "prerelease-check/$TAG"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
-            # Push the conflict markers so the merge can be resolved in the PR branch.
-            git add -A
-            git commit -m "Sync upstream $TAG (conflicts to resolve)"
-            body="Merge of upstream release [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG) has **conflicts**. Resolve them on this branch before merging."
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
           fi
 
-          git push origin "$branch"
-          gh pr create --base main --head "$branch" \
-            --title "Sync upstream $TAG" --body "$body"
+      - name: Run the test suite on the merge
+        id: tests
+        if: steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          branch="prerelease-check/$TAG"
+          gh workflow run ci.yml --ref "$branch"
+          sleep 20
+          run_id=$(gh run list --workflow ci.yml --branch "$branch" --event workflow_dispatch \
+            --limit 1 --json databaseId --jq '.[0].databaseId')
+          echo "url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_OUTPUT"
+          if gh run watch "$run_id" --exit-status; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open an issue on failure
+        if: steps.release.outputs.needed == 'true' && (steps.merge.outputs.conflict == 'true' || steps.tests.outputs.passed == 'false')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          CONFLICT: ${{ steps.merge.outputs.conflict }}
+          RUN_URL: ${{ steps.tests.outputs.url }}
+        run: |
+          if [ "$CONFLICT" = "true" ]; then
+            reason="Merging the prerelease into \`$TARGET_BRANCH\` produces **conflicts**."
+          else
+            reason="The test suite fails on \`$TARGET_BRANCH\` merged with the prerelease: $RUN_URL"
+          fi
+          gh issue create \
+            --title "Upstream prerelease $TAG breaks the fork" \
+            --body "Upstream prerelease [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG) is not compatible with the fork. $reason The next stable release will likely need manual work."
+
+      - name: Record the prerelease as checked
+        if: steps.release.outputs.needed == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git tag "prerelease-checked/$TAG" "origin/$TARGET_BRANCH"
+          git push origin "prerelease-checked/$TAG"
+          git push origin --delete "prerelease-check/$TAG" || true

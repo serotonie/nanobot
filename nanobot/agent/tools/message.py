@@ -167,6 +167,7 @@ class MessageTool(Tool):
             "the final reply is delivered to the current chat automatically. "
             "Use this tool to deliver generated images via media."
             " On Signal, use reaction to add or remove an emoji reaction instead of sending text."
+            " Never mirror an incoming reaction back; react only when the user asks for it."
             " Use quote={} to reply with a native Signal citation to the current message, "
             "or specify a quote target to cite another message."
         )

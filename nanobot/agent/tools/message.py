@@ -50,6 +50,23 @@ _REACTION_SCHEMA = ObjectSchema(
     ),
 )
 
+_QUOTE_SCHEMA = ObjectSchema(
+    target_author=StringSchema("Signal phone number or UUID of the message author.", min_length=1),
+    target_timestamp=IntegerSchema(
+        description="Original Signal message timestamp in milliseconds.",
+        minimum=1,
+        maximum=2**63 - 1,
+    ),
+    text=StringSchema("Original message text to display in the quote."),
+    additional_properties=False,
+    description=(
+        "Signal only: send a native quoted reply with text or media. "
+        "Use {} to reply to the current incoming message. "
+        "To cite another message, supply both target_author and target_timestamp, "
+        "and text when known. Never invent message identifiers."
+    ),
+)
+
 
 @contextmanager
 def capture_message_deliveries() -> Generator[set[tuple[str, str]], None, None]:
@@ -87,6 +104,7 @@ def capture_message_deliveries() -> Generator[set[tuple[str, str]], None, None]:
             description="Optional: inline keyboard buttons as list of rows, each row is list of button labels.",
         ),
         reaction=_REACTION_SCHEMA,
+        quote=_QUOTE_SCHEMA,
         required=["content"],
     )
 )
@@ -149,6 +167,8 @@ class MessageTool(Tool):
             "the final reply is delivered to the current chat automatically. "
             "Use this tool to deliver generated images via media."
             " On Signal, use reaction to add or remove an emoji reaction instead of sending text."
+            " Use quote={} to reply with a native Signal citation to the current message, "
+            "or specify a quote target to cite another message."
         )
 
     def _resolve_media(self, media: list[str]) -> list[str]:
@@ -177,6 +197,7 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         buttons: Any = None,
         reaction: Any = None,
+        quote: Any = None,
         **kwargs: Any,
     ) -> str:
         from nanobot.utils.helpers import strip_think
@@ -250,6 +271,46 @@ class MessageTool(Tool):
                 return ToolResult.error(f"Error: media path is not allowed: {str(e)}")
 
         metadata = dict(default_metadata) if same_target else {}
+        if quote is not None:
+            if channel != "signal":
+                return ToolResult.error("Error: quotes are supported only on Signal")
+            if reaction is not None or not (content or media):
+                return ToolResult.error("Error: send quotes with text or media, not reactions")
+            errors = _QUOTE_SCHEMA.validate_value(quote, "quote")
+            if errors:
+                return ToolResult.error(f"Error: {'; '.join(errors)}")
+            quote_data = dict(cast(dict[str, Any], quote))
+            has_author = "target_author" in quote_data
+            has_timestamp = "target_timestamp" in quote_data
+            if has_author != has_timestamp:
+                return ToolResult.error(
+                    "Error: supply both quote target_author and target_timestamp, or omit both"
+                )
+            if not has_author:
+                if not same_target:
+                    return ToolResult.error(
+                        "Error: quotes to another chat require target_author and target_timestamp"
+                    )
+                if default_metadata.get("reaction"):
+                    return ToolResult.error(
+                        "Error: quoting a reaction requires an explicit original message target"
+                    )
+                quote_data["target_author"] = default_metadata.get("sender_number")
+                quote_data["target_timestamp"] = default_metadata.get("timestamp")
+                quote_data.setdefault("text", default_metadata.get("message_text", ""))
+            errors = _QUOTE_SCHEMA.validate_value(quote_data, "quote")
+            if errors:
+                return ToolResult.error(
+                    f"Error: cannot resolve Signal quote target: {'; '.join(errors)}"
+                )
+            author = quote_data.get("target_author")
+            timestamp = quote_data.get("target_timestamp")
+            if not isinstance(author, str) or not author.strip() or timestamp is None:
+                return ToolResult.error("Error: cannot resolve Signal quote target")
+            quote_data["target_author"] = author.strip()
+            quote_data["target_timestamp"] = int(cast(int, timestamp))
+            quote_data.setdefault("text", "")
+            metadata["signal_quote"] = quote_data
         if reaction is not None:
             if channel != "signal":
                 return ToolResult.error("Error: reactions are supported only on Signal")

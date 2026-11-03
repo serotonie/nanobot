@@ -1076,6 +1076,12 @@ Incoming reaction additions and removals are forwarded to the agent with the emo
 
 The agent can add a reaction with the `message` tool: `{"content": "", "reaction": {"emoji": "👍"}}`. On a Signal turn this targets the current incoming message, or the original message referenced by an incoming reaction. To remove the bot's reaction, send the same emoji with `"remove": true`. To target another message, provide both `target_author` (Signal phone number or UUID) and `target_timestamp` (original message timestamp in milliseconds) inside `reaction`; these are required for cross-chat sends. Reactions cannot be combined with text, attachments or buttons. Sending uses signal-cli's `sendReaction` JSON-RPC method and requires no additional channel configuration.
 
+**Quoted replies**
+
+Incoming replies include the quoted message text, author and timestamp in the agent's context. To send a native Signal reply to the current incoming message, the agent can use the `message` tool with `{"content": "My reply", "quote": {}}`. This quotes the current message, not an older message it may itself quote. Normal replies remain unquoted unless the agent explicitly requests a quote.
+
+To cite another message, use `{"content": "My reply", "quote": {"target_author": "+1234567890", "target_timestamp": 1234567890000, "text": "Original message"}}`. The author and timestamp must identify a real message in the destination conversation; both are required for another chat. The optional `text` is the original text to display, not the bot's reply. Nanobot does not fetch arbitrary Signal message history. Quotes support text and attachments, but cannot be combined with reactions. Long replies quote the original only on the first chunk. No additional channel configuration is needed.
+
 **Media and separate containers**
 
 Outbound media files are read by Nanobot and sent to signal-cli as base64 data URIs,

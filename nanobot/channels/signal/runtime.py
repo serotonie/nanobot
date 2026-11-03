@@ -594,6 +594,8 @@ class SignalChannel(BaseChannel):
             raise ChannelNotReadyError("Signal client not connected")
         is_progress_message = isinstance(msg.event, ProgressEvent)
         try:
+            if "signal_quote" in msg.metadata and "signal_reaction" in msg.metadata:
+                raise ValueError("Send Signal quotes separately from reactions")
             if "signal_reaction" in msg.metadata:
                 reaction = _parse_signal_reaction(msg.metadata["signal_reaction"])
                 if msg.content or msg.media or msg.buttons:
@@ -616,6 +618,29 @@ class SignalChannel(BaseChannel):
             if not plain_text and not msg.media:
                 return
             recipient_params = self._recipient_params(msg.chat_id)
+            quote_params: dict[str, Any] = {}
+            if "signal_quote" in msg.metadata:
+                quote_data = _as_json_object(msg.metadata["signal_quote"])
+                if quote_data is None:
+                    raise ValueError("Signal quote must be an object")
+                author = quote_data.get("target_author")
+                timestamp = quote_data.get("target_timestamp")
+                text = quote_data.get("text", "")
+                if not isinstance(author, str) or not author.strip():
+                    raise ValueError("Signal quote requires a target author")
+                if (
+                    not isinstance(timestamp, int)
+                    or isinstance(timestamp, bool)
+                    or not 0 < timestamp <= 2**63 - 1
+                ):
+                    raise ValueError("Signal quote requires a positive target timestamp")
+                if not isinstance(text, str):
+                    raise ValueError("Signal quote text must be a string")
+                quote_params = {
+                    "quoteTimestamp": timestamp,
+                    "quoteAuthor": author.strip(),
+                    "quoteMessage": text,
+                }
             attachments = [
                 await asyncio.to_thread(_encode_signal_attachment, source)
                 for source in msg.media
@@ -628,6 +653,8 @@ class SignalChannel(BaseChannel):
                 if chunk_styles[i]:
                     params["textStyle"] = chunk_styles[i]
                 params.update(recipient_params)
+                if i == 0:
+                    params.update(quote_params)
                 if attachments and i == 0:
                     params["attachments"] = attachments
 
@@ -853,6 +880,7 @@ class SignalChannel(BaseChannel):
             mentions=mentions,
             is_group_message=is_group_message,
             chat_id=chat_id,
+            quoted_message=_as_json_object(data_message.get("quote")),
         )
 
         self.logger.debug("Received Signal message from {}", sender_number)
@@ -870,6 +898,8 @@ class SignalChannel(BaseChannel):
                     "sender_number": sender_number,
                     "is_group": is_group_message,
                     "group_id": group_id,
+                    "message_text": message_text,
+                    **({"quote": data_message["quote"]} if data_message.get("quote") else {}),
                     **({"reaction": reaction} if reaction else {}),
                 },
                 is_dm=not is_group_message,
@@ -952,6 +982,7 @@ class SignalChannel(BaseChannel):
         mentions: list[dict[str, Any]],
         is_group_message: bool,
         chat_id: str,
+        quoted_message: dict[str, Any] | None = None,
     ) -> tuple[str, list[str]]:
         content_parts: list[str] = []
         media_paths: list[str] = []
@@ -960,6 +991,20 @@ class SignalChannel(BaseChannel):
             buffer_context = self._get_group_buffer_context(chat_id)
             if buffer_context:
                 content_parts.append(f"[Recent group messages for context:]\n{buffer_context}\n---")
+
+        if quoted_message:
+            author = (
+                quoted_message.get("authorNumber")
+                or quoted_message.get("authorUuid")
+                or quoted_message.get("author")
+                or "unknown"
+            )
+            text = quoted_message.get("text")
+            quoted_text = text if isinstance(text, str) and text else "[text unavailable]"
+            content_parts.append(
+                f"[Quoted Signal message from {author}, "
+                f"timestamp={quoted_message.get('id')}]\n{quoted_text}\n[End quote]"
+            )
 
         if message_text:
             if is_group_message:

@@ -282,6 +282,58 @@ async def test_message_tool_does_not_guess_missing_reaction_target() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel", "quote", "extra", "metadata", "error"),
+    [
+        ("telegram", {}, {}, {}, "only on Signal"),
+        ("signal", {}, {"chat_id": "other=="}, {}, "another chat"),
+        ("signal", {"target_author": "author"}, {}, {}, "supply both"),
+        ("signal", {}, {}, {}, "cannot resolve"),
+        ("signal", {}, {"reaction": {"emoji": "👍"}}, {}, "not reactions"),
+        ("signal", {"target_author": " ", "target_timestamp": 1}, {}, {}, "cannot resolve"),
+        ("signal", {"target_author": "author", "target_timestamp": True}, {}, {}, "integer"),
+        ("signal", {}, {}, {"reaction": {"emoji": "👍"}}, "explicit original"),
+        ("signal", {"text": 42}, {}, {}, "string"),
+    ],
+)
+async def test_message_tool_rejects_invalid_quote(channel, quote, extra, metadata, error):
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send)
+    with request_context(RequestContext(channel=channel, chat_id="chat", metadata=metadata)):
+        result = await tool.execute(content="Reply", quote=quote, **extra)
+    assert result.startswith("Error:")
+    assert error in result
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_message_tool_quotes_explicit_cross_chat_target():
+    sent: list[OutboundMessage] = []
+
+    async def send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=send)
+    with request_context(RequestContext(
+        channel="signal", chat_id="source", metadata={"timestamp": 1, "sender_number": "source"},
+    )):
+        result = await tool.execute(
+            content="Reply", chat_id="group==",
+            quote={"target_author": "author-uuid", "target_timestamp": 123, "text": "Original"},
+        )
+    assert result == "Message sent to signal:group=="
+    assert sent[0].metadata == {
+        "signal_quote": {
+            "target_author": "author-uuid", "target_timestamp": 123, "text": "Original",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_message_tool_resolves_relative_media_paths() -> None:
     sent: list[OutboundMessage] = []
 

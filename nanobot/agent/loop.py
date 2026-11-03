@@ -408,6 +408,7 @@ class AgentLoop:
             max_concurrent_subagents=max_concurrent_subagents,
             consolidator=self.consolidator,
             session_manager=self.sessions,
+            human_control=self.tools.human_control,
         )
         self._unified_session = unified_session
         self._running = False

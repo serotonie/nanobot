@@ -152,16 +152,26 @@ async def _execute_tool_call(
             return handled
         return payload, event
 
-    await hook.before_execute_tool(context, tool_call, tool, params)
     try:
-        with (
-            file_read_context(tool_call.id, read_results)
-            if tool_call.name == "read_file" else nullcontext()
-        ):
-            if tool is not None:
-                result = await tool.execute(**params)
+        human_control = getattr(tools, "human_control", None)
+        operation = (
+            human_control.agent_operation()
+            if human_control is not None else nullcontext()
+        )
+        async with operation:
+            await hook.before_execute_tool(context, tool_call, tool, params)
+            with (
+                file_read_context(tool_call.id, read_results)
+                if tool_call.name == "read_file" else nullcontext()
+            ):
+                if tool is not None:
+                    result = await tool.execute(**params)
+                else:
+                    result = await tools.execute(tool_call.name, params)
+            if is_tool_error_result(result):
+                await hook.on_execute_tool_error(context, tool_call, tool, params, result)
             else:
-                result = await tools.execute(tool_call.name, params)
+                await hook.after_execute_tool(context, tool_call, tool, params, result)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -184,7 +194,6 @@ async def _execute_tool_call(
         return payload, event
 
     if is_tool_error_result(result):
-        await hook.on_execute_tool_error(context, tool_call, tool, params, result)
         payload = with_tool_error_hint(result)
         event = {
             "name": tool_call.name,
@@ -201,8 +210,6 @@ async def _execute_tool_call(
         if handled is not None:
             return handled
         return payload, event
-
-    await hook.after_execute_tool(context, tool_call, tool, params, result)
 
     detail = "" if result is None else str(result)
     detail = detail.replace("\n", " ").strip()

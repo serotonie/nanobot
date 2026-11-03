@@ -1,4 +1,4 @@
-name: Upstream Prerelease Check
+name: Upstream Sync
 
 on:
   schedule:
@@ -6,64 +6,78 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: upstream-prerelease-check
+  group: upstream-sync
   cancel-in-progress: false
 
 permissions:
   contents: write
   actions: write
   issues: write
+  pull-requests: write
 
 env:
   UPSTREAM_REPO: HKUDS/nanobot
   TARGET_BRANCH: main
 
 jobs:
-  check:
-    name: Test latest upstream prerelease against fork
+  sync:
+    name: Test prereleases and merge stable releases
     runs-on: ubuntu-latest
+    env:
+      # A PAT is needed to push upstream workflow file changes, trigger CI and assign Copilot.
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ env.TARGET_BRANCH }}
-          # A PAT is needed so upstream workflow file changes can be pushed.
           token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Find newest upstream release
         id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           read -r tag pre < <(gh api "repos/$UPSTREAM_REPO/releases" \
             --jq '[.[] | select(.draft == false)][0] | "\(.tag_name) \(.prerelease)"')
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "refs/tags/$tag:refs/tags/upstream-$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if [ "$pre" != "true" ]; then
-            echo "Newest release $tag is stable; nothing to check."
+          if [ "$pre" = "true" ]; then
+            kind=prerelease
+            branch="prerelease-check/$tag"
+          else
+            kind=stable
+            branch="sync/upstream-$tag"
+          fi
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/upstream-synced/$tag" >/dev/null; then
+            echo "$tag already handled."
             echo "needed=false" >> "$GITHUB_OUTPUT"
-          elif git ls-remote --exit-code --tags origin "refs/tags/prerelease-checked/$tag" >/dev/null; then
-            echo "Prerelease $tag already checked."
+          elif [ "$kind" = stable ] && git merge-base --is-ancestor "upstream-$tag" "origin/$TARGET_BRANCH"; then
+            echo "$tag is already in $TARGET_BRANCH."
             echo "needed=false" >> "$GITHUB_OUTPUT"
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Merge prerelease into a test branch
+      - name: Merge release into a test branch
         id: merge
         if: steps.release.outputs.needed == 'true'
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ steps.release.outputs.branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
-          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/upstream-$TAG"
-          git checkout -b "prerelease-check/$TAG"
-          if git merge --no-ff -m "Test upstream $TAG" "upstream-$TAG"; then
-            git push origin "prerelease-check/$TAG"
+          git checkout -b "$BRANCH"
+          if git merge --no-ff -m "Sync upstream $TAG" "upstream-$TAG"; then
+            git push --force origin "$BRANCH"
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
-            git merge --abort
+            # Push the conflict markers so Copilot can resolve them on this branch.
+            git add -A
+            git commit -qm "Sync upstream $TAG (conflicts to resolve)"
+            git push --force origin "$BRANCH"
             echo "conflict=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -71,13 +85,11 @@ jobs:
         id: tests
         if: steps.merge.outputs.conflict == 'false'
         env:
-          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ steps.release.outputs.branch }}
         run: |
-          branch="prerelease-check/$TAG"
-          gh workflow run ci.yml --ref "$branch"
+          gh workflow run ci.yml --ref "$BRANCH"
           sleep 20
-          run_id=$(gh run list --workflow ci.yml --branch "$branch" --event workflow_dispatch \
+          run_id=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch \
             --limit 1 --json databaseId --jq '.[0].databaseId')
           echo "url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_OUTPUT"
           if gh run watch "$run_id" --exit-status; then
@@ -86,28 +98,55 @@ jobs:
             echo "passed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open an issue on failure
+      - name: Merge a passing stable release into the target branch
+        if: steps.release.outputs.kind == 'stable' && steps.tests.outputs.passed == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+          RUN_URL: ${{ steps.tests.outputs.url }}
+        run: |
+          gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" \
+            --title "Sync upstream $TAG" \
+            --body "Merge of upstream release [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG). Tests passed: $RUN_URL"
+          gh pr merge "$BRANCH" --merge --delete-branch
+
+      - name: Report a conflict or failing tests
+        id: report
         if: steps.release.outputs.needed == 'true' && (steps.merge.outputs.conflict == 'true' || steps.tests.outputs.passed == 'false')
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
+          KIND: ${{ steps.release.outputs.kind }}
+          BRANCH: ${{ steps.release.outputs.branch }}
           CONFLICT: ${{ steps.merge.outputs.conflict }}
           RUN_URL: ${{ steps.tests.outputs.url }}
         run: |
           if [ "$CONFLICT" = "true" ]; then
-            reason="Merging the prerelease into \`$TARGET_BRANCH\` produces **conflicts**."
+            reason="Merging it into \`$TARGET_BRANCH\` produces **conflicts**."
           else
-            reason="The test suite fails on \`$TARGET_BRANCH\` merged with the prerelease: $RUN_URL"
+            reason="The test suite fails on \`$TARGET_BRANCH\` merged with it: $RUN_URL"
           fi
-          gh issue create \
-            --title "Upstream prerelease $TAG breaks the fork" \
-            --body "Upstream prerelease [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG) is not compatible with the fork. $reason The next stable release will likely need manual work."
+          if [ "$KIND" = prerelease ]; then
+            title="Upstream prerelease $TAG breaks the fork"
+            todo="The next stable release will likely need the same fix. Merge \`upstream-$TAG\` into a branch from \`$TARGET_BRANCH\`, fix it, and open a PR to \`$TARGET_BRANCH\`."
+          else
+            title="Upstream release $TAG cannot be merged"
+            todo="Fix it on the branch \`$BRANCH\` (already pushed), then open a PR to \`$TARGET_BRANCH\`."
+          fi
+          body="Upstream [$TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$TAG) is not compatible with the fork. $reason $todo"
+          # Assigning Copilot lets it propose a fix as a PR; the issue is still created if that fails.
+          gh issue create --title "$title" --body "$body" --assignee copilot \
+            || gh issue create --title "$title" --body "$body"
 
-      - name: Record the prerelease as checked
-        if: steps.release.outputs.needed == 'true'
+      - name: Record the release as handled
+        if: steps.release.outputs.needed == 'true' && (steps.release.outputs.kind == 'prerelease' || steps.report.conclusion == 'success')
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+          KIND: ${{ steps.release.outputs.kind }}
         run: |
-          git tag "prerelease-checked/$TAG" "origin/$TARGET_BRANCH"
-          git push origin "prerelease-checked/$TAG"
-          git push origin --delete "prerelease-check/$TAG" || true
+          git tag "upstream-synced/$TAG" "origin/$TARGET_BRANCH"
+          git push origin "upstream-synced/$TAG"
+          # Failed stable syncs keep their branch for the fix.
+          if [ "$KIND" = prerelease ]; then
+            git push origin --delete "$BRANCH" || true
+          fi

@@ -959,7 +959,10 @@ class TestHandleDataMessageDM:
         assert len(handled) == 1
         msg = handled[0]
         action = "removed" if remove else "added"
-        assert msg["content"] == f"[Signal reaction: {action} 👍 on message 999 by {author}]"
+        assert msg["content"] == (
+            f"[Signal reaction: {action} 👍 on message 999 by {author}; passive notification, "
+            "do not react back or reply unless the user asks]"
+        )
         assert msg["chat_id"] == "+19995550001"
         assert msg["metadata"]["reaction"] == {
             "emoji": "👍",

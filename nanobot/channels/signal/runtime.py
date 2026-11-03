@@ -835,7 +835,8 @@ class SignalChannel(BaseChannel):
             message_text = (
                 f"[Signal reaction: {action} {reaction['emoji']} "
                 f"on message {reaction['target_timestamp']} "
-                f"by {reaction['target_author']}]"
+                f"by {reaction['target_author']}; passive notification, "
+                "do not react back or reply unless the user asks]"
             )
             attachments = []
             mentions = []

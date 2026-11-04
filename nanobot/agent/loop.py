@@ -982,7 +982,7 @@ class AgentLoop:
         return msg.session_key
 
     def _can_inject_message(self, msg: InboundMessage) -> bool:
-        if turn_continuation.internal_continuation_inbound(msg.metadata) or any(
+        if msg.response_optional or turn_continuation.internal_continuation_inbound(msg.metadata) or any(
             coordinator.owns_turn(msg) for coordinator in self._automation_turn_coordinators
         ):
             return False
@@ -1039,6 +1039,7 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         request_context: RequestContext | None = None,
         provider_state: ProviderConversationState | None = None,
+        response_optional: bool = False,
     ) -> AgentRunResult:
         self._sync_subagent_runtime_limits()
 
@@ -1321,14 +1322,15 @@ class AgentLoop:
                     tools=effective_tools.get_definitions(),
                     persist=session is not None and not ephemeral,
                 ),
-                injection_callback=_drain_pending,
-                terminal_injection_callback=_wait_for_pending,
-                continuation_callback=_goal_continue,
+                injection_callback=None if response_optional else _drain_pending,
+                terminal_injection_callback=None if response_optional else _wait_for_pending,
+                continuation_callback=None if response_optional else _goal_continue,
                 finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
                     pending_queue_available=pending_queue is not None and session is not None,
                     session_metadata=session_metadata,
                     message_metadata=request_metadata,
                 ),
+                response_optional=response_optional,
                 provider_state=provider_state,
                 llm_usage_source=source_from_request(
                     active_session_key,
@@ -2285,6 +2287,7 @@ class AgentLoop:
                 tools=ctx.tools,
                 request_context=ctx.request_context,
                 provider_state=ctx.provider_state,
+                response_optional=ctx.msg.response_optional,
                 events=ctx.events,
             )
         ctx.final_content = result.final_content
@@ -2293,6 +2296,8 @@ class AgentLoop:
         ctx.provider_compaction_applied = result.provider_compaction_applied
         ctx.stop_reason = result.stop_reason
         ctx.failure_error_kind = result.failure_error_kind
+        if result.stop_reason == "no_response":
+            ctx.suppress_response = True
         if (
             ctx.kind is TurnKind.USER
             and (ctx.delivery.route.channel, ctx.delivery.route.chat_id) in message_sends

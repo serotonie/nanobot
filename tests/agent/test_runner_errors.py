@@ -109,7 +109,8 @@ async def test_tool_execution_propagates_control_flow_exceptions(control_error: 
 
 
 @pytest.mark.asyncio
-async def test_llm_error_not_appended_to_session_messages():
+@pytest.mark.parametrize("response_optional", [False, True])
+async def test_llm_error_not_appended_to_session_messages(response_optional):
     """When LLM returns finish_reason='error', the error content must NOT be
     appended to the messages list (prevents polluting session history)."""
     from nanobot.agent.runner import (
@@ -131,6 +132,7 @@ async def test_llm_error_not_appended_to_session_messages():
         model="test-model",
         max_iterations=5,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        response_optional=response_optional,
     ))
 
     assert result.stop_reason == "error"

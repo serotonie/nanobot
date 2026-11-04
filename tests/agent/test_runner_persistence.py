@@ -509,9 +509,12 @@ async def test_existing_sanitized_bucket_reference_remains_readable(tmp_path):
     reference = f"[truncated: {path}]"
     config = ContextGovernanceConfig(
         provider=MagicMock(), model="test", tools=ToolRegistry(), workspace=tmp_path,
-        session_key="test:runner", max_tool_result_chars=2048,
+        session_key="test:runner", max_tool_result_chars=64,
     )
+    assert len(reference) > config.max_tool_result_chars
     assert ContextGovernor.normalize_tool_result(config, "call_big", "exec", reference) == reference
+    assert list((tmp_path / ".nanobot/tool-results").iterdir()) == [path.parent]
+    assert path.read_text(encoding="utf-8") == raw
     assert raw in await ReadFileTool(workspace=tmp_path).execute(path=str(path))
 
 

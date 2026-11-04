@@ -572,6 +572,8 @@ def maybe_persist_tool_result(
 
     Complete references may exceed the per-block ``max_chars`` budget.
     """
+    if content.startswith("[truncated: ") and content.endswith("]"):
+        return content
     if workspace is None or max_chars <= 0 or len(content) <= max_chars:
         return content
 

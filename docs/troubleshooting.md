@@ -33,6 +33,14 @@ To fix an existing instance:
 
 Moving only the config leaves history behind. Choosing a new workspace without moving its contents (including memory, skills, and `.nanobot/workspace-id`) can start an empty workspace with a different session identity.
 
+## Tool-result persistence reports “File name too long”
+
+Oversized tool output is saved under `<workspace>/.nanobot/tool-results/`. Updated gateways bound session bucket names and result filenames by UTF-8 byte length, including space for atomic-write temporary filenames. Long identifiers and identifiers changed by filename sanitization use deterministic SHA-256 names prefixed with `~`; that prefix is reserved, so identifiers starting with `~` are hashed too. Short, already-safe names stay unchanged. Provider tool-call IDs are not shortened.
+
+Use the path in the saved-output reference rather than reconstructing it from a session or tool-call ID. Existing files and references are not migrated or rewritten by this naming change; normal retention still applies. Session keys containing characters such as `:` use a hashed bucket for new writes to avoid sanitization collisions. Do not delete sessions or rewrite histories to work around this error.
+
+Other persistence failures, such as a full disk or missing write permissions, still use the existing error logging. A filename-length error alone does not establish why a model returned an empty response.
+
 ## How to Read `nanobot status`
 
 `nanobot status` does not call a model. It checks the selected config and workspace, resolves environment references, and validates the local settings required by the active provider/model without constructing a provider client.

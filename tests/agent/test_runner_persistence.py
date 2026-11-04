@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
 import os
 import time
+from hashlib import sha256
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,7 +30,10 @@ def test_unrecognized_result_list_is_not_partially_offloaded(tmp_path, invalid_b
     assert list(tmp_path.iterdir()) == []
 
 
-async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path):
+@pytest.mark.parametrize(
+    "call_id", ["call_big", "call_" + "x" * 453, "call_" + "界" * 150 + "|fc_123"],
+)
+async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path, call_id):
     from nanobot.agent.loop import AgentLoop
     from nanobot.agent.runner import AgentRunner
     from nanobot.session.manager import Session
@@ -41,7 +47,7 @@ async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path):
         if call_count["n"] == 1:
             return LLMResponse(
                 content="working",
-                tool_calls=[ToolCallRequest(id="call_big", name="list_dir", arguments={"path": "."})],
+                tool_calls=[ToolCallRequest(id=call_id, name="list_dir", arguments={"path": "."})],
                 usage=LLMUsage.reported(input_tokens=5, output_tokens=3),
             )
         captured_second_call[:] = messages
@@ -69,13 +75,17 @@ async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path):
     assert "[tool output persisted]" in tool_message["content"]
     assert "Result truncated. Read the saved file" in tool_message["content"]
     assert "tool-results" in tool_message["content"]
-    persisted_path = tmp_path / ".nanobot" / "tool-results" / "test_runner" / "call_big.txt"
+    assert tool_message["tool_call_id"] == call_id
+    assistant = next(msg for msg in captured_second_call if msg.get("tool_calls"))
+    assert assistant["tool_calls"][0]["id"] == call_id
+    persisted_path = next((tmp_path / ".nanobot" / "tool-results").glob("*/*.txt"))
+    assert str(persisted_path) in tool_message["content"]
     assert persisted_path.read_text(encoding="utf-8") == "x" * 20_000
 
     from nanobot.agent.tools.filesystem import ReadFileTool
 
     readback = await ReadFileTool(workspace=tmp_path).execute(
-        path=".nanobot/tool-results/test_runner/call_big.txt"
+        path=str(persisted_path)
     )
     assert "x" * 20_000 in readback
 
@@ -111,6 +121,111 @@ async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path):
     )
     assert replay_result.final_content == "replayed"
     assert replay_tool["content"] == tool_message["content"]
+    assert replay_tool["tool_call_id"] == call_id
+
+
+@pytest.mark.parametrize(
+    ("session_key", "call_id"),
+    [
+        ("session", "a" * 213),
+        ("session", "a" * 214),
+        ("session", "a" * 251),
+        ("session", "a" * 458),
+        ("session", "界" * 71),
+        ("session", "界" * 72),
+        ("s" * 255, "call"),
+        ("s" * 256, "call"),
+        ("界" * 85, "call"),
+        ("界" * 150, "界" * 150),
+    ],
+)
+def test_persist_tool_result_bounds_names_and_reuses_output(
+    tmp_path, monkeypatch, session_key, call_id,
+):
+    from nanobot.utils import file_io
+    from nanobot.utils.helpers import maybe_persist_tool_result
+
+    temporary_names = []
+    replace = Path.replace
+
+    def checked_replace(source, target):
+        temporary_names.append(source.name)
+        assert len(source.name.encode("utf-8")) <= 255
+        assert source.read_text(encoding="utf-8") == raw
+        return replace(source, target)
+
+    monkeypatch.setattr(file_io.Path, "replace", checked_replace)
+    raw = "完整 output\n" * 1000
+    reference = maybe_persist_tool_result(tmp_path, session_key, call_id, raw, max_chars=64)
+    path = Path(reference.removeprefix("[truncated: ").removesuffix("]"))
+    assert path.is_relative_to(tmp_path / ".nanobot" / "tool-results")
+    assert len(path.parent.name.encode("utf-8")) <= 255
+    assert len(path.name.encode("utf-8")) + 38 <= 255
+    assert path.read_text(encoding="utf-8") == raw
+    assert len(temporary_names) == 1
+    assert list(path.parent.iterdir()) == [path]
+
+    # A subsequent process can reuse the same file without rewriting it.
+    monkeypatch.setattr(file_io.Path, "replace", lambda *_: pytest.fail("rewrote tool result"))
+    assert maybe_persist_tool_result(
+        tmp_path, session_key, call_id, raw, max_chars=64,
+    ) == reference
+    assert path.read_text(encoding="utf-8") == raw
+
+
+@pytest.mark.parametrize("component", ["session", "call"])
+@pytest.mark.parametrize(
+    "identifiers",
+    [
+        ["a:b", "a/b", "a_b"],
+        [" " + "name", "name"],
+        ["x" * 458 + "a", "x" * 458 + "b"],
+        ["界" * 150 + "a", "界" * 150 + "b"],
+        ["a:b", "~" + sha256(b"a:b").hexdigest()],
+        [".", "..", "default"],
+    ],
+)
+def test_persist_tool_result_keeps_distinct_identifiers_isolated(tmp_path, component, identifiers):
+    from nanobot.utils.helpers import maybe_persist_tool_result
+
+    paths = []
+    for index, identifier in enumerate(identifiers):
+        session_key = identifier if component == "session" else "session"
+        call_id = identifier if component == "call" else "call"
+        content = str(index) * 5000
+        reference = maybe_persist_tool_result(tmp_path, session_key, call_id, content, max_chars=64)
+        path = Path(reference.removeprefix("[truncated: ").removesuffix("]"))
+        assert path.is_relative_to(tmp_path / ".nanobot" / "tool-results")
+        paths.append(path)
+    assert len(set(paths)) == len(identifiers)
+    for index, path in enumerate(paths):
+        assert path.read_text(encoding="utf-8") == str(index) * 5000
+
+
+def test_persist_tool_result_preserves_ordinary_existing_names(tmp_path):
+    from nanobot.utils.helpers import maybe_persist_tool_result
+
+    path = tmp_path / ".nanobot/tool-results/session/call.txt"
+    path.parent.mkdir(parents=True)
+    content = "existing result\n" * 1000
+    path.write_text(content, encoding="utf-8")
+    reference = maybe_persist_tool_result(tmp_path, "session", "call", content, max_chars=64)
+    assert reference == f"[truncated: {path}]"
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_persist_tool_result_propagates_atomic_write_errors(tmp_path, monkeypatch):
+    from nanobot.utils import file_io
+    from nanobot.utils.helpers import maybe_persist_tool_result
+
+    def fail_replace(*_args):
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(file_io.Path, "replace", fail_replace)
+    with pytest.raises(OSError) as exc:
+        maybe_persist_tool_result(tmp_path, "session", "x" * 458, "x" * 5000, max_chars=64)
+    assert exc.value.errno == errno.ENOSPC
+    assert list((tmp_path / ".nanobot/tool-results").glob("*/*")) == []
 
 
 def test_persist_tool_result_prunes_old_session_buckets(tmp_path):
@@ -140,7 +255,7 @@ def test_persist_tool_result_prunes_old_session_buckets(tmp_path):
     assert ".nanobot" in persisted
     assert not old_bucket.exists()
     assert recent_bucket.exists()
-    assert (root / "current_session" / "call_big.txt").exists()
+    assert len(list(root.glob("*/call_big.txt"))) == 1
 
 
 def test_persist_tool_result_leaves_no_temp_files(tmp_path):
@@ -155,8 +270,8 @@ def test_persist_tool_result_leaves_no_temp_files(tmp_path):
         max_chars=64,
     )
 
-    assert (root / "current_session" / "call_big.txt").exists()
-    assert list((root / "current_session").glob("*.tmp")) == []
+    assert len(list(root.glob("*/call_big.txt"))) == 1
+    assert list(root.glob("*/*.tmp")) == []
 
 
 def test_persist_tool_result_logs_cleanup_failures(monkeypatch, tmp_path):
@@ -380,6 +495,51 @@ async def test_mixed_tool_text_survives_model_save_replay(tmp_path):
     readback = await reader.execute(path=".nanobot/tool-results/mixed/mixed_text_0.txt")
     assert raw in readback
     assert messages[-1]["content"][0]["text"] == raw
+
+
+async def test_existing_sanitized_bucket_reference_remains_readable(tmp_path):
+    from nanobot.agent.context_governance import ContextGovernanceConfig, ContextGovernor
+    from nanobot.agent.tools.filesystem import ReadFileTool
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    path = tmp_path / ".nanobot/tool-results/test_runner/call_big.txt"
+    path.parent.mkdir(parents=True)
+    raw = "old output " * 1000
+    path.write_text(raw, encoding="utf-8")
+    reference = f"[truncated: {path}]"
+    config = ContextGovernanceConfig(
+        provider=MagicMock(), model="test", tools=ToolRegistry(), workspace=tmp_path,
+        session_key="test:runner", max_tool_result_chars=64,
+    )
+    assert len(reference) > config.max_tool_result_chars
+    assert ContextGovernor.normalize_tool_result(config, "call_big", "exec", reference) == reference
+    assert list((tmp_path / ".nanobot/tool-results").iterdir()) == [path.parent]
+    assert path.read_text(encoding="utf-8") == raw
+    assert raw in await ReadFileTool(workspace=tmp_path).execute(path=str(path))
+
+
+async def test_unverified_truncated_references_are_offloaded(tmp_path):
+    from nanobot.agent.context_governance import ContextGovernanceConfig, ContextGovernor
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    external_path = tmp_path / "outside.txt"
+    external_path.write_text("not a saved tool result", encoding="utf-8")
+    raw_results = [
+        f"[truncated: {external_path}]",
+        f"[truncated: {'x' * 128}]",
+    ]
+    config = ContextGovernanceConfig(
+        provider=MagicMock(), model="test", tools=ToolRegistry(), workspace=tmp_path,
+        session_key="test:runner", max_tool_result_chars=64,
+    )
+
+    for index, raw in enumerate(raw_results):
+        assert len(raw) > config.max_tool_result_chars
+        result = ContextGovernor.normalize_tool_result(config, f"call_{index}", "exec", raw)
+        assert result != raw
+        persisted_path = Path(result.removeprefix("[truncated: ").removesuffix("]"))
+        assert persisted_path.parent.parent == (tmp_path / ".nanobot/tool-results").resolve()
+        assert persisted_path.read_text(encoding="utf-8") == raw
 
 
 async def test_tiny_budget_keeps_complete_readable_reference(tmp_path):

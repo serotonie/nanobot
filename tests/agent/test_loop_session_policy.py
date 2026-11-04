@@ -88,6 +88,103 @@ async def test_transient_session_keeps_history_without_persisting_or_durable_too
     await loop.aclose()
 
 
+@pytest.mark.asyncio
+async def test_signal_reply_only_conversation_isolated_under_unified_sessions(tmp_path) -> None:
+    loop = _loop(tmp_path, ["owner response", "sender response"], unified_session=True)
+    loop.context.memory.write_memory("owner private memory marker")
+    owner_message = InboundMessage(
+        channel="signal",
+        sender_id="+10000000001",
+        chat_id="+10000000001",
+        content="owner private history marker",
+    )
+    await loop._process_message(
+        owner_message,
+        session_key=loop._effective_session_key(owner_message),
+    )
+
+    restricted_message = InboundMessage(
+        channel="signal",
+        sender_id="+10000000002",
+        chat_id="+10000000002",
+        content="What is the answer?",
+        session_key_override="signal:reply-only:+10000000002",
+        authorization_role="signal_reply_only",
+        reply_only_owner_chat_id="+10000000003",
+    )
+    assert loop._effective_session_key(restricted_message) == restricted_message.session_key
+    response = await loop._process_message(
+        restricted_message,
+        session_key=loop._effective_session_key(restricted_message),
+    )
+
+    assert response is not None
+    assert response.chat_id == "+10000000002"
+    assert response.content == "sender response"
+    restricted_call = loop.provider.chat_stream_with_retry.await_args_list[1].kwargs
+    assert "owner private memory marker" not in str(restricted_call["messages"])
+    assert "owner private history marker" not in str(restricted_call["messages"])
+    assert [tool["function"]["name"] for tool in restricted_call["tools"]] == ["message"]
+    assert loop.sessions.get_cached(restricted_message.session_key) is not None
+    assert loop.sessions.get_cached(UNIFIED_SESSION_KEY) is not None
+    await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_signal_reply_only_command_is_explicitly_rejected(tmp_path) -> None:
+    loop = _loop(tmp_path, [])
+    message = InboundMessage(
+        channel="signal",
+        sender_id="+10000000002",
+        chat_id="+10000000002",
+        content="/stop",
+        session_key_override="signal:reply-only:+10000000002",
+        authorization_role="signal_reply_only",
+        reply_only_owner_chat_id="+10000000003",
+    )
+
+    await loop._dispatch_inbound(message)
+
+    response = loop.bus.outbound.get_nowait()
+    assert response.chat_id == "+10000000002"
+    assert "unavailable to Signal reply-only senders" in response.content
+    await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reply_only_session_remains_restricted_when_inbound_role_is_recovered(tmp_path) -> None:
+    loop = _loop(tmp_path, ["first response", "recovered response"])
+    loop.context.memory.write_memory("owner private memory marker")
+    key = "signal:reply-only:+10000000002"
+    initial = InboundMessage(
+        channel="signal",
+        sender_id="+10000000002",
+        chat_id="+10000000002",
+        content="first question",
+        session_key_override=key,
+        authorization_role="signal_reply_only",
+        reply_only_owner_chat_id="+10000000003",
+    )
+    await loop._process_message(initial, session_key=key)
+    persisted = loop.sessions.get_cached(key)
+    assert persisted is not None
+    assert persisted.metadata["_signal_reply_only_owner"] == "+10000000003"
+
+    recovered = InboundMessage(
+        channel="signal",
+        sender_id="+10000000002",
+        chat_id="+10000000002",
+        content="follow-up",
+        session_key_override=key,
+    )
+    await loop._process_message(recovered, session_key=key)
+
+    call = loop.provider.chat_stream_with_retry.await_args_list[1].kwargs
+    assert [tool["function"]["name"] for tool in call["tools"]] == ["message"]
+    assert "owner private memory marker" not in str(call["messages"])
+    await loop.aclose()
+
+
 @pytest.mark.parametrize("selection", ["explicit_empty", "disable_all", "default"])
 async def test_turn_tool_selection_preserves_empty_registries(tmp_path, monkeypatch, selection) -> None:
     monkeypatch.setattr("nanobot.agent.tools.loader.entry_points", lambda **kwargs: [])

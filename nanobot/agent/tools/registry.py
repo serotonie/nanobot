@@ -53,6 +53,9 @@ class ToolRegistry:
 
     def get_runtime_context_providers(self) -> list[RuntimeContextProvider]:
         """Return tool-owned providers in stable tool-name order."""
+        request = current_request_context()
+        if request is not None and request.authorization_role == "signal_reply_only":
+            return []
         providers: list[RuntimeContextProvider] = []
         for name in sorted(self._tools):
             provider = self._tools[name].runtime_context_provider()
@@ -100,6 +103,10 @@ class ToolRegistry:
         sorted and appended. The result is cached until the next
         register/unregister call.
         """
+        request = current_request_context()
+        if request is not None and request.authorization_role == "signal_reply_only":
+            tool = self.get("message") if request.reply_only_owner_chat_id else None
+            return [tool.to_schema()] if tool else []
         if self._cached_definitions is None:
             definitions = [tool.to_schema() for tool in self._tools.values()]
             builtins: list[dict[str, Any]] = []
@@ -123,6 +130,15 @@ class ToolRegistry:
         params: Any,
     ) -> tuple[Tool | None, Any, str | None]:
         """Resolve, cast, and validate one tool call."""
+        request = current_request_context()
+        if (
+            request is not None
+            and request.authorization_role == "signal_reply_only"
+            and (name != "message" or not request.reply_only_owner_chat_id)
+        ):
+            return None, params, ToolResult.error(
+                f"Error: tool '{name}' is not available to Signal reply-only senders"
+            )
         tool = self.get(name)
         if not tool:
             suggestion = self._suggest_name(str(name))

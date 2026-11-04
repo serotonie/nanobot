@@ -89,8 +89,16 @@ class ContextBuilder:
         session_summary: SessionSummary | None = None,
         workspace: Path | None = None,
         include_memory: bool = True,
+        include_shared_context: bool = True,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        if not include_shared_context:
+            return (
+                "You are a private Signal reply-only assistant. Answer the sender's "
+                "messages normally. Do not claim access to private files, memory, or "
+                "other conversations. The only available tool reports text to the "
+                "configured owner."
+            )
         root = workspace or self.workspace
         parts = [self._get_identity(channel=channel, workspace=root)]
 
@@ -263,6 +271,7 @@ class ContextBuilder:
         channel: str | None = None,
         workspace: Path | None = None,
         include_memory: bool = True,
+        include_shared_context: bool = True,
     ) -> list[dict[str, Any]]:
         """Build a model transcript while preserving the fresh-turn boundary."""
         root = workspace or self.workspace
@@ -275,6 +284,7 @@ class ContextBuilder:
                         session_summary=transcript.session_summary,
                         workspace=root,
                         include_memory=include_memory,
+                        include_shared_context=include_shared_context,
                     ),
                 },
                 *transcript.history,
@@ -286,7 +296,10 @@ class ContextBuilder:
                 transcript.current_message,
                 media=list(transcript.media) if transcript.media else None,
                 current_role=transcript.current_role,
-                runtime_context_blocks=transcript.runtime_context_blocks,
+                runtime_context_blocks=(
+                    transcript.runtime_context_blocks if include_shared_context else None
+                ),
+                include_skills=include_shared_context,
             )
             messages.append(current)
             return messages
@@ -298,13 +311,17 @@ class ContextBuilder:
         media: list[str] | None = None,
         current_role: str = "user",
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
+        include_skills: bool = True,
     ) -> dict[str, Any]:
         """Build only the fresh turn message without merging it into history."""
         content = self.build_user_content(current_message, image_paths=media)
         blocks: list[RuntimeContextBlock] = []
         if current_role == "user":
             blocks.extend(runtime_context_blocks or ())
-            skill_context = self.skills.build_explicit_skill_runtime_context(current_message)
+            skill_context = (
+                self.skills.build_explicit_skill_runtime_context(current_message)
+                if include_skills else None
+            )
             if skill_context is not None and skill_context not in blocks:
                 blocks.append(skill_context)
         merged, runtime_context_meta = append_runtime_context(content, blocks)

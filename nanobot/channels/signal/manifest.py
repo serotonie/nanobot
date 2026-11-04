@@ -13,6 +13,8 @@ SETUP_SPEC = ChannelSetupSpec(
         "attachmentsDir": field(),
         "dm.enabled": field("bool", default=True),
         "dm.policy": field("enum", choices={"open", "allowlist"}, default="allowlist"),
+        "dm.owner": field(),
+        "dm.replyOnly": field("list"),
         "group.enabled": field("bool", default=False),
         "group.policy": field("enum", choices={"open", "allowlist"}, default="allowlist"),
         "group.requireMention": field("bool", default=True),

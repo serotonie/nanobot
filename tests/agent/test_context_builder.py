@@ -161,6 +161,30 @@ class TestLoadBootstrapFiles:
         assert "User prefers Chinese." in result
 
 
+def test_reply_only_transcript_excludes_shared_workspace_context(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("private owner instructions", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("private owner profile", encoding="utf-8")
+    builder = _builder(tmp_path)
+
+    transcript = builder.build_transcript(
+        TranscriptInput(
+            history=[{"role": "user", "content": "sender's prior message"}],
+            current_message="What is two plus two?",
+            runtime_context_blocks=[
+                RuntimeContextBlock(source="owner", content="owner private runtime context"),
+            ],
+        ),
+        include_shared_context=False,
+    )
+
+    assert transcript[0]["role"] == "system"
+    assert "private owner instructions" not in transcript[0]["content"]
+    assert "private owner profile" not in transcript[0]["content"]
+    assert "owner private runtime context" not in str(transcript)
+    assert "sender's prior message" in transcript[1]["content"]
+    assert "What is two plus two?" in transcript[2]["content"]
+
+
 class TestIsTemplateContent:
     def test_nonexistent_template_returns_false(self):
         assert ContextBuilder._is_template_content("anything", "nonexistent/path.md") is False

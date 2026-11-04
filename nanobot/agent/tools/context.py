@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_checkable
 
 from nanobot.config.network import NetworkConfig
 
@@ -39,6 +39,8 @@ class RequestContext:
     runtime: LLMRuntime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     sender_id: str | None = None
+    authorization_role: Literal["signal_reply_only"] | None = None
+    reply_only_owner_chat_id: str | None = None
     turn_id: str | None = None
     workspace: Path | None = None
     attributes: dict[str, Any] = field(default_factory=dict)

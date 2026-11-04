@@ -47,6 +47,7 @@ from nanobot.bus.events import (
     INBOUND_META_TURN_ID,
     INBOUND_META_USER_SHELL,
     RUNTIME_CONTROL_SESSION_DISCARD,
+    SIGNAL_REPLY_ONLY_SESSION_PREFIX,
     InboundMessage,
     OutboundMessage,
 )
@@ -129,6 +130,15 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
 _SUBAGENT_TERMINAL_WAIT_SECONDS = 300.0
+_SIGNAL_REPLY_ONLY_ROLE_META = "_signal_reply_only_role"
+_SIGNAL_REPLY_ONLY_OWNER_META = "_signal_reply_only_owner"
+
+
+def _is_signal_reply_only_message(msg: InboundMessage) -> bool:
+    return (
+        msg.authorization_role == "signal_reply_only"
+        or msg.session_key.startswith(SIGNAL_REPLY_ONLY_SESSION_PREFIX)
+    )
 
 
 def _prompt_scope_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -792,6 +802,8 @@ class AgentLoop:
             metadata=dict(ctx.msg.metadata or {}),
             attributes=dict(ctx.attributes),
             sender_id=ctx.msg.sender_id,
+            authorization_role=ctx.msg.authorization_role,
+            reply_only_owner_chat_id=ctx.msg.reply_only_owner_chat_id,
             turn_id=origin["turn_id"],
             workspace=scope.project_path,
             workspace_scope=scope,
@@ -815,6 +827,8 @@ class AgentLoop:
         request: RequestContext,
         tools: ToolRegistry,
     ) -> list[RuntimeContextBlock]:
+        if request.authorization_role == "signal_reply_only":
+            return []
         providers = [
             *tools.get_runtime_context_providers(),
             *self._runtime_context_providers,
@@ -1123,6 +1137,8 @@ class AgentLoop:
                         metadata=dict(metadata),
                         attributes=dict(request_ctx.attributes),
                         sender_id=pending_msg.sender_id,
+                        authorization_role=request_ctx.authorization_role,
+                        reply_only_owner_chat_id=request_ctx.reply_only_owner_chat_id,
                         turn_id=request_ctx.turn_id,
                         workspace=scope.project_path,
                         # Injected input continues the active run's tool policy.
@@ -1229,6 +1245,7 @@ class AgentLoop:
             channel=request_ctx.channel,
             workspace=effective_scope.project_path,
             include_memory=session.policy.persist if session is not None else True,
+            include_shared_context=request_ctx.authorization_role != "signal_reply_only",
         )
         if request_context is None:
             request_ctx = dataclasses.replace(
@@ -1429,6 +1446,19 @@ class AgentLoop:
     async def _dispatch_inbound(self, msg: InboundMessage) -> None:
         raw = command_text(msg)
         effective_key = self._effective_session_key(msg)
+        if (
+            _is_signal_reply_only_message(msg)
+            and (
+                self.commands.command_name(raw) is not None
+                or msg.metadata.get(INBOUND_META_USER_SHELL) is True
+            )
+        ):
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Error: commands and shell execution are unavailable to Signal reply-only senders.",
+            ))
+            return
         if msg.metadata.get(INBOUND_META_RUNTIME_CONTROL) == RUNTIME_CONTROL_SESSION_DISCARD:
             await self.discard_session(msg.session_key)
             return
@@ -2050,6 +2080,24 @@ class AgentLoop:
             else:
                 ctx.session = await self.sessions.state.get(ctx.session_key)
         session = ctx.session
+        if _is_signal_reply_only_message(msg):
+            owner_chat_id = msg.reply_only_owner_chat_id
+            if msg.authorization_role != "signal_reply_only":
+                owner_chat_id = session.metadata.get(_SIGNAL_REPLY_ONLY_OWNER_META)
+            if not isinstance(owner_chat_id, str) or not owner_chat_id:
+                raise RuntimeError("reply-only Signal session is missing its owner destination")
+            role_metadata = {
+                _SIGNAL_REPLY_ONLY_ROLE_META: "signal_reply_only",
+                _SIGNAL_REPLY_ONLY_OWNER_META: owner_chat_id,
+            }
+            if any(session.metadata.get(key) != value for key, value in role_metadata.items()):
+                session.metadata.update(role_metadata)
+            ctx.msg = dataclasses.replace(
+                msg,
+                authorization_role="signal_reply_only",
+                reply_only_owner_chat_id=owner_chat_id,
+            )
+            msg = ctx.msg
         await ctx.delivery.bind_session_generation(session.generation)
         ctx.ephemeral = ctx.ephemeral or not session.policy.persist
         tools = ctx.tools if ctx.tools is not None else self.tools
@@ -2102,6 +2150,13 @@ class AgentLoop:
     async def _dispatch_command(self, ctx: TurnContext) -> bool:
         if ctx.kind is TurnKind.SYSTEM or ctx.msg.channel == "system":
             return False
+        if _is_signal_reply_only_message(ctx.msg):
+            ctx.outbound = OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content="Error: commands are unavailable to Signal reply-only senders.",
+            )
+            return True
         session = ctx.require_session()
         raw = command_text(ctx.msg)
         _, automation_metadata = automation_history_overrides(ctx.msg.metadata)
@@ -2210,6 +2265,10 @@ class AgentLoop:
                 ctx.msg.content,
                 media=ctx.msg.media if ctx.kind is TurnKind.USER and ctx.msg.media else None,
                 runtime_context_blocks=ctx.runtime_context_blocks,
+                include_skills=(
+                    ctx.request_context is None
+                    or ctx.request_context.authorization_role != "signal_reply_only"
+                ),
             )
             task_id = ctx.msg.metadata.get("subagent_task_id") if is_subagent else None
             already_staged = False

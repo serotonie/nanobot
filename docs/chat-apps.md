@@ -1070,6 +1070,30 @@ signal-cli -a +1234567890 daemon --http localhost:8080
 > - `attachmentsDir`: Override the directory where signal-cli stores inbound attachments. Defaults to `~/.local/share/signal-cli/attachments` (the Linux default). Set this if signal-cli runs with a custom `XDG_DATA_HOME` or on macOS/Windows.
 > - `groupMessageBufferSize`: Number of recent group messages kept for context (default `20`, must be > 0).
 
+**Optional reply-only Signal senders**
+
+Reply-only access is an explicit per-sender restriction for private DMs. The sender must still pass the existing `dm.enabled`, `dm.policy`, `dm.allowFrom`, and pairing checks; this setting does not grant access or change those defaults. Configure the owner recipient and trusted sender identifiers under `dm`:
+
+```json
+{
+  "channels": {
+    "signal": {
+      "dm": {
+        "enabled": true,
+        "policy": "allowlist",
+        "allowFrom": ["OWNER_SIGNAL_ID", "TRUSTED_SENDER_SIGNAL_ID"],
+        "owner": "OWNER_SIGNAL_ID",
+        "replyOnly": ["TRUSTED_SENDER_SIGNAL_ID"]
+      }
+    }
+  }
+}
+```
+
+`dm.owner` is the fixed Signal destination for reports, and `dm.replyOnly` is an empty list by default. Entries match trusted Signal envelope identifiers (phone number, UUID, service ID, or ACI); display names and message text are never used for authorization. A reply-only sender receives a separate conversation context without the owner's memory, workspace bootstrap files, skills, history, or privileged tools. They can chat normally and ask the agent to report text to the configured owner; the report tool accepts no recipient, channel, attachment, or other routing options. Groups are not assigned this role.
+
+To activate the role, add only the intended sender identifiers and owner ID, then restart the gateway. To roll back, remove `dm.replyOnly` (and `dm.owner` if unused) and restart; new messages then follow the existing DM policy and use its normal conversation. An interrupted reply-only session remains restricted if it is resumed. With `dm.policy: "open"` or a wildcard allowlist, unconfigured senders retain the existing full-access behavior, so use an allowlist if that is not intended. For an allowlist rollback that should deny the sender entirely, also remove their `dm.allowFrom` entry and pairing approval.
+
 **Reactions (tapbacks)**
 
 Incoming reaction additions and removals are forwarded to the agent with the emoji, original message author and original message timestamp. They follow the same DM and group access policies as text messages. With `group.requireMention: true`, a reaction to the bot's own message counts as addressing the bot; reactions to other participants remain in the group context buffer without triggering a reply.

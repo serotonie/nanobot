@@ -757,9 +757,14 @@ class GatewayHTTPHandler:
                 content_type="application/json; charset=utf-8",
                 extra_headers=_NO_STORE_HEADERS,
             )
-        token = self.tokens.issue_token(self.config.token_ttl_s, audience="webui")
+        session_id = self.tokens.issue_session(self.config.token_ttl_s)
+        token = self.tokens.issue_token(
+            self.config.token_ttl_s,
+            audience="webui",
+            session_id=session_id,
+        )
         api_token = (
-            self.tokens.issue_api_token(self.config.token_ttl_s)
+            self.tokens.issue_api_token(self.config.token_ttl_s, session_id=session_id)
             if api_token_allowed
             else None
         )

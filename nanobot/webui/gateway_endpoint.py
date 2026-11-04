@@ -48,6 +48,7 @@ class WebUIGatewayEndpoint:
         self._http = http
         self._tokens = tokens
         self.webui_connections: set[ServerConnection] = set()
+        self.webui_sessions: dict[ServerConnection, str] = {}
 
     async def process_request(
         self,
@@ -86,7 +87,12 @@ class WebUIGatewayEndpoint:
     ) -> Any:
         """Authorize a WebSocket upgrade and remember trusted WebUI connections."""
         if is_trusted_proxy_authenticated_request(connection, headers or {}, self._config):
+            if not self._tokens.can_issue():
+                return connection.respond(HTTPStatus.TOO_MANY_REQUESTS, "Too many active WebUI sessions")
             self.webui_connections.add(connection)
+            self.webui_sessions[connection] = self._tokens.issue_session(
+                self._config.token_ttl_s
+            )
             return None
 
         supplied = query_first(query, "token")
@@ -109,13 +115,33 @@ class WebUIGatewayEndpoint:
 
     def consume_issued_token(self, connection: ServerConnection, token: str) -> bool:
         """Consume one issued token and record its WebUI audience when present."""
-        audience = self._tokens.take_issued_token_audience(token)
+        identity = self._tokens.take_issued_token_identity(token)
+        if identity is None:
+            return False
+        audience, session_id = identity
         if audience == "webui":
+            if session_id is None:
+                return False
             self.webui_connections.add(connection)
-        return audience is not None
+            self.webui_sessions[connection] = session_id
+        return True
+
+    def webui_session_id(self, connection: ServerConnection) -> str | None:
+        """Return the server-assigned auth session for a verified WebUI socket."""
+        return self.webui_sessions.get(connection)
+
+    def webui_session_is_active(self, connection: ServerConnection) -> bool:
+        session_id = self.webui_session_id(connection)
+        return (
+            connection in self.webui_connections
+            and session_id is not None
+            and self._tokens.session_is_active(session_id)
+        )
 
     def discard_connection(self, connection: ServerConnection) -> None:
         self.webui_connections.discard(connection)
+        self.webui_sessions.pop(connection, None)
 
     def clear(self) -> None:
         self.webui_connections.clear()
+        self.webui_sessions.clear()

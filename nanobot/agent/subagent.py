@@ -30,6 +30,7 @@ from nanobot.agent.tools.context import (
 )
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStates
+from nanobot.agent.tools.human_control import HumanControlGate
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
@@ -221,6 +222,7 @@ class SubagentManager:
         consolidator: Consolidator,
         network_config: NetworkConfig | None = None,
         session_manager: SessionManager | None = None,
+        human_control: HumanControlGate | None = None,
     ):
         if cast(object, consolidator) is None:
             raise TypeError("SubagentManager requires a consolidator")
@@ -253,6 +255,7 @@ class SubagentManager:
         self.bus = bus
         self.tools_config = tools_config or ToolsConfig()
         self.network_config = network_config or NetworkConfig()
+        self.human_control = human_control or HumanControlGate()
         self.max_tool_result_chars = max_tool_result_chars
         self.restrict_to_workspace = restrict_to_workspace
         self.disabled_skills = set(disabled_skills or [])
@@ -521,7 +524,7 @@ class SubagentManager:
         exec_manager: ExecSessionManager | None = None,
     ) -> ToolRegistry:
         root = self.workspace if workspace is None else workspace
-        registry = ToolRegistry()
+        registry = ToolRegistry(human_control=self.human_control)
         cfg = tools_config if tools_config is not None else self._subagent_tools_config()
         ctx = ToolContext(
             config=cfg,

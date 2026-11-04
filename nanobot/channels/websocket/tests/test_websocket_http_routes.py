@@ -245,6 +245,9 @@ async def test_bootstrap_returns_token_for_localhost(
         assert channel.gateway.tokens.issued_token_audiences[body["token"]] == "webui"
         assert body["api_token"].startswith("nbwt_")
         assert body["api_token"] != body["token"]
+        session_id = channel.gateway.tokens.issued_token_sessions[body["token"]]
+        assert channel.gateway.tokens.api_token_sessions[body["api_token"]] == session_id
+        assert "session_id" not in body
         assert body["ws_path"] == "/"
         assert body["ws_url"] == "ws://127.0.0.1:29901/"
         assert body["expires_in"] > 0

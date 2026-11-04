@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import ContextAware, current_request_context
+from nanobot.agent.tools.human_control import HumanControlGate
 
 if TYPE_CHECKING:
     from nanobot.runtime_context import RuntimeContextProvider
@@ -33,9 +34,10 @@ class ToolRegistry:
     Allows dynamic registration and execution of tools.
     """
 
-    def __init__(self):
+    def __init__(self, *, human_control: HumanControlGate | None = None):
         self._tools: dict[str, Tool] = {}
         self._cached_definitions: list[dict[str, Any]] | None = None
+        self.human_control = human_control or HumanControlGate()
 
     def register(self, tool: Tool) -> None:
         """Register a tool."""
@@ -202,12 +204,17 @@ class ToolRegistry:
 
         try:
             assert tool is not None  # guarded by prepare_call()
-            result = await tool.execute(**params)
+            result = await self.execute_prepared(tool, params)
             if is_tool_error_result(result):
                 return ToolResult.error(with_tool_error_hint(str(result)))
             return result
         except Exception as e:
             return ToolResult.error(with_tool_error_hint(f"Error executing {name}: {str(e)}"))
+
+    async def execute_prepared(self, tool: Tool, params: dict[str, Any]) -> Any:
+        """Execute a validated tool through the shared server-side control gate."""
+        async with self.human_control.agent_operation():
+            return await tool.execute(**params)
 
     @property
     def tool_names(self) -> list[str]:

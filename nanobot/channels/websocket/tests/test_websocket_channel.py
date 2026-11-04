@@ -1198,6 +1198,37 @@ def test_only_bootstrap_tokens_mark_webui_connections(bus: MagicMock) -> None:
 
     assert webui_connection in channel._webui_connections
     assert client_connection not in channel._webui_connections
+    session_id = channel.gateway.endpoint.webui_session_id(webui_connection)
+    assert session_id is not None
+    assert channel.gateway.endpoint.webui_session_is_active(webui_connection)
+    assert channel.gateway.endpoint.webui_session_id(client_connection) is None
+    channel.gateway.tokens.revoke_session(session_id)
+    assert not channel.gateway.endpoint.webui_session_is_active(webui_connection)
+
+
+def test_webui_credentials_share_revocable_auth_session(bus: MagicMock) -> None:
+    channel = _ch(bus)
+    tokens = channel.gateway.tokens
+    session_id = tokens.issue_session(300)
+    websocket_token = tokens.issue_token(
+        300,
+        audience="webui",
+        session_id=session_id,
+    )
+    api_token = tokens.issue_api_token(300, session_id=session_id)
+
+    identity = tokens.take_issued_token_identity(websocket_token)
+    assert identity == ("webui", session_id)
+    assert tokens.take_issued_token_identity(websocket_token) is None
+
+    class _ApiRequest:
+        path = "/api/sessions"
+        headers = {"Authorization": "Bearer " + api_token}
+
+    assert tokens.check_api_token(_ApiRequest())
+    assert tokens.revoke_session(session_id)
+    assert not tokens.check_api_token(_ApiRequest())
+    assert not tokens.revoke_session(session_id)
 
 
 @pytest.mark.asyncio

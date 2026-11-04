@@ -518,6 +518,30 @@ async def test_existing_sanitized_bucket_reference_remains_readable(tmp_path):
     assert raw in await ReadFileTool(workspace=tmp_path).execute(path=str(path))
 
 
+async def test_unverified_truncated_references_are_offloaded(tmp_path):
+    from nanobot.agent.context_governance import ContextGovernanceConfig, ContextGovernor
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    external_path = tmp_path / "outside.txt"
+    external_path.write_text("not a saved tool result", encoding="utf-8")
+    raw_results = [
+        f"[truncated: {external_path}]",
+        f"[truncated: {'x' * 128}]",
+    ]
+    config = ContextGovernanceConfig(
+        provider=MagicMock(), model="test", tools=ToolRegistry(), workspace=tmp_path,
+        session_key="test:runner", max_tool_result_chars=64,
+    )
+
+    for index, raw in enumerate(raw_results):
+        assert len(raw) > config.max_tool_result_chars
+        result = ContextGovernor.normalize_tool_result(config, f"call_{index}", "exec", raw)
+        assert result != raw
+        persisted_path = Path(result.removeprefix("[truncated: ").removesuffix("]"))
+        assert persisted_path.parent.parent == (tmp_path / ".nanobot/tool-results").resolve()
+        assert persisted_path.read_text(encoding="utf-8") == raw
+
+
 async def test_tiny_budget_keeps_complete_readable_reference(tmp_path):
     from nanobot.agent.context_governance import ContextGovernanceConfig, ContextGovernor
     from nanobot.agent.tools.filesystem import ReadFileTool

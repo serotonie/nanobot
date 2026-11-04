@@ -560,6 +560,20 @@ def _cleanup_tool_result_buckets(root: Path, current_bucket: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _is_saved_tool_result_reference(workspace: Path, content: str) -> bool:
+    if not content.startswith("[truncated: ") or not content.endswith("]"):
+        return False
+    reference_path = Path(content[len("[truncated: ") : -1])
+    if not reference_path.is_absolute():
+        return False
+    try:
+        root = (workspace / _TOOL_RESULTS_DIR).resolve(strict=True)
+        path = reference_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return path.suffix == ".txt" and path.is_file() and path.parent.parent == root
+
+
 def maybe_persist_tool_result(
     workspace: Path | None,
     session_key: str | None,
@@ -572,7 +586,7 @@ def maybe_persist_tool_result(
 
     Complete references may exceed the per-block ``max_chars`` budget.
     """
-    if content.startswith("[truncated: ") and content.endswith("]"):
+    if workspace is not None and _is_saved_tool_result_reference(workspace, content):
         return content
     if workspace is None or max_chars <= 0 or len(content) <= max_chars:
         return content

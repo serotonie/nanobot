@@ -1072,9 +1072,9 @@ signal-cli -a +1234567890 daemon --http localhost:8080
 
 **Reactions (tapbacks)**
 
-Incoming reaction additions and removals are forwarded to the agent with the emoji, original message author and original message timestamp. They follow the same DM and group access policies as text messages. With `group.requireMention: true`, a reaction to the bot's own message counts as addressing the bot; reactions to other participants remain in the group context buffer without triggering a reply.
+Incoming reaction-only additions and removals are ignored in DMs and groups, including reactions to the bot's messages. They do not invoke the model, send replies or typing indicators, or interrupt an active turn, and are not retained as conversation context. This behavior is always enabled and has no configuration setting. Ordinary text and media still follow the configured DM/group access and mention policies.
 
-The agent can add a reaction with the `message` tool: `{"content": "", "reaction": {"emoji": "👍"}}`. On a Signal turn this targets the current incoming message, or the original message referenced by an incoming reaction. To remove the bot's reaction, send the same emoji with `"remove": true`. To target another message, provide both `target_author` (Signal phone number or UUID) and `target_timestamp` (original message timestamp in milliseconds) inside `reaction`; these are required for cross-chat sends. Reactions cannot be combined with text, attachments or buttons. Sending uses signal-cli's `sendReaction` JSON-RPC method and requires no additional channel configuration.
+The agent can add a reaction with the `message` tool: `{"content": "", "reaction": {"emoji": "👍"}}`. On a Signal turn this targets the current incoming message. To remove the bot's reaction, send the same emoji with `"remove": true`. To target another message, provide both `target_author` (Signal phone number or UUID) and `target_timestamp` (original message timestamp in milliseconds) inside `reaction`; these are required for cross-chat sends. Reactions cannot be combined with text, attachments or buttons. Sending uses signal-cli's `sendReaction` JSON-RPC method and requires no additional channel configuration.
 
 **Quoted replies**
 

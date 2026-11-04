@@ -22,6 +22,7 @@ from nanobot.channels.signal.runtime import (
     SignalDMConfig,
     SignalGroupConfig,
 )
+from nanobot.providers.base import GenerationSettings, LLMResponse
 
 
 class _FakeResponse:
@@ -943,8 +944,9 @@ class TestHandleDataMessageDM:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("remove", [False, True])
     @pytest.mark.parametrize("author_field", ["targetAuthorNumber", "targetAuthorUuid", "targetAuthor"])
-    async def test_reaction_forwarded(self, remove, author_field):
+    async def test_reaction_ignored(self, remove, author_field):
         ch, handled = self._make_dm_channel()
+        ch._start_typing = AsyncMock()
         author = "+10000000000" if author_field != "targetAuthorUuid" else "bot-uuid"
         params = _dm_envelope(
             message="",
@@ -956,21 +958,8 @@ class TestHandleDataMessageDM:
             },
         )
         await ch._handle_receive_notification(params)
-        assert len(handled) == 1
-        msg = handled[0]
-        action = "removed" if remove else "added"
-        assert msg["content"] == (
-            f"[Signal reaction: {action} 👍 on message 999 by {author}; passive notification, "
-            "do not react back or reply unless the user asks]"
-        )
-        assert msg["chat_id"] == "+19995550001"
-        assert msg["metadata"]["reaction"] == {
-            "emoji": "👍",
-            "target_author": author,
-            "target_timestamp": 999,
-            "remove": remove,
-        }
-        assert msg["media"] == []
+        assert handled == []
+        ch._start_typing.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -978,6 +967,7 @@ class TestHandleDataMessageDM:
         [
             {"dm_enabled": False},
             {"dm_policy": "allowlist", "dm_allow_from": ["+18885550001"]},
+            {"dm_policy": "allowlist"},
         ],
     )
     async def test_reactions_respect_dm_policy(self, overrides):
@@ -994,16 +984,18 @@ class TestHandleDataMessageDM:
             )
         )
         assert handled == []
+        assert ch._http.posts == []
+        assert ch.bus.outbound.empty()
 
     @pytest.mark.asyncio
-    async def test_malformed_reaction_is_logged_without_publishing(self):
+    async def test_malformed_reaction_ignored(self):
         ch, handled = self._make_dm_channel()
-        ch.logger = MagicMock()
+        ch._start_typing = AsyncMock()
         await ch._handle_receive_notification(
             _dm_envelope(message="", reaction={"emoji": "👍", "targetSentTimestamp": True})
         )
         assert handled == []
-        ch.logger.opt.return_value.error.assert_called_once()
+        ch._start_typing.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_message_ignored(self):
@@ -1400,24 +1392,12 @@ class TestCommandHandling:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("incoming_reaction", [False, True])
-async def test_signal_receive_to_message_tool_to_rpc(incoming_reaction):
+async def test_signal_receive_to_message_tool_to_rpc():
     ch = _make_channel()
     ch._start_typing = AsyncMock()
     client = _FakeHTTPClient()
     ch._http = client
-    reaction = (
-        {
-            "emoji": "👍",
-            "targetAuthorNumber": "+10000000000",
-            "targetSentTimestamp": 999,
-            "isRemove": False,
-        }
-        if incoming_reaction else None
-    )
-    await ch._handle_receive_notification(
-        _dm_envelope(message="" if incoming_reaction else "hello", reaction=reaction)
-    )
+    await ch._handle_receive_notification(_dm_envelope(message="hello"))
     inbound = ch.bus.inbound.get_nowait()
     tool = MessageTool(send_callback=ch.bus.publish_outbound)
     with request_context(RequestContext(
@@ -1434,8 +1414,8 @@ async def test_signal_receive_to_message_tool_to_rpc(incoming_reaction):
     assert payload["params"] == {
         "recipient": ["+19995550001"],
         "emoji": "❤️",
-        "targetAuthor": "+10000000000" if incoming_reaction else "+19995550001",
-        "targetTimestamp": 999 if incoming_reaction else 1000,
+        "targetAuthor": "+19995550001",
+        "targetTimestamp": 1000,
         "remove": False,
     }
 
@@ -1477,38 +1457,117 @@ async def test_scheduled_signal_reaction_survives_queue_restart(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("overrides", "target_author", "delivered"),
+    ("overrides", "target_author"),
     [
-        ({}, "+10000000000", True),
-        ({}, "+18885550001", False),
-        ({"require_mention": False}, "+18885550001", True),
-        ({"group_enabled": False}, "+10000000000", False),
+        ({}, "+10000000000"),
+        ({}, "+18885550001"),
+        ({"require_mention": False}, "+18885550001"),
+        ({"group_enabled": False}, "+10000000000"),
         (
             {"group_policy": "allowlist", "group_allow_from": ["other-group=="]},
             "+10000000000",
-            False,
         ),
     ],
 )
-async def test_group_reactions_follow_access_and_addressing_policy(
-    overrides, target_author, delivered,
+@pytest.mark.parametrize("remove", [False, True])
+async def test_group_reactions_ignored(
+    overrides, target_author, remove,
 ):
     ch, handled = _make_channel_with_capture(
         **{"group_enabled": True, "require_mention": True, **overrides},
     )
+    ch._start_typing = AsyncMock()
     params = _group_envelope(group_id="grp==", message="", use_v2=True)
     params["envelope"]["dataMessage"]["reaction"] = {
         "emoji": "👍",
         "targetAuthorNumber": target_author,
         "targetSentTimestamp": 999,
-        "isRemove": False,
+        "isRemove": remove,
     }
     await ch._handle_receive_notification(params)
-    assert bool(handled) is delivered
-    if delivered:
-        assert handled[0]["chat_id"] == "grp=="
-        assert handled[0]["metadata"]["is_group"] is True
-        assert "[Bob]: [Signal reaction: added 👍" in handled[0]["content"]
+    assert handled == []
+    ch._start_typing.assert_not_awaited()
+    assert ch._group_buffers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_group", [False, True])
+@pytest.mark.parametrize("remove", [False, True])
+@pytest.mark.parametrize("active", [False, True])
+async def test_passive_reaction_never_enters_model_turn(tmp_path, is_group, remove, active):
+    from nanobot.agent.loop import AgentLoop
+
+    ch = _make_channel(group_enabled=True, require_mention=False)
+    ch._start_typing = AsyncMock()
+    ch._http = _FakeHTTPClient()
+    ch.bus.publish_inbound = AsyncMock(wraps=ch.bus.publish_inbound)
+    provider = MagicMock(aclose=AsyncMock())
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings(max_tokens=100)
+    provider.can_resume_conversation_state.return_value = False
+    provider.estimate_prompt_tokens.return_value = (100, "test")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def chat(**kwargs):
+        started.set()
+        await release.wait()
+        return LLMResponse(content="normal answer")
+
+    provider.chat_stream_with_retry = AsyncMock(side_effect=chat)
+    loop = AgentLoop(bus=ch.bus, provider=provider, workspace=tmp_path, model="test-model")
+    loop.tools.get_definitions = MagicMock(return_value=[])
+    worker = asyncio.create_task(loop.run())
+    normal = _group_envelope(message="hello") if is_group else _dm_envelope(message="hello")
+    passive = _group_envelope(message="") if is_group else _dm_envelope(message="")
+    passive["envelope"]["dataMessage"]["reaction"] = {
+        "emoji": "👍",
+        "targetAuthorNumber": "+10000000000",
+        "targetSentTimestamp": 999,
+        "isRemove": remove,
+    }
+    chat_id = "group123==" if is_group else "+19995550001"
+    try:
+        if active:
+            await ch._handle_receive_notification(normal)
+            await asyncio.wait_for(started.wait(), timeout=5)
+        ch.bus.publish_inbound.reset_mock()
+        ch._start_typing.reset_mock()
+
+        await ch._handle_receive_notification(passive)
+
+        ch.bus.publish_inbound.assert_not_awaited()
+        ch._start_typing.assert_not_awaited()
+        assert ch.bus.inbound.empty()
+        assert ch.bus.outbound.empty()
+        assert ch._http.posts == []
+        if active:
+            provider.chat_stream_with_retry.assert_awaited_once()
+            assert loop._pending_queues[f"signal:{chat_id}"].empty()
+        else:
+            provider.chat_stream_with_retry.assert_not_awaited()
+            await ch._handle_receive_notification(normal)
+            await asyncio.wait_for(started.wait(), timeout=5)
+
+        release.set()
+        await asyncio.wait_for(
+            asyncio.gather(*loop._active_tasks[f"signal:{chat_id}"]), timeout=5,
+        )
+        provider.chat_stream_with_retry.assert_awaited_once()
+        replies = []
+        while not ch.bus.outbound.empty():
+            outbound = ch.bus.outbound.get_nowait()
+            if outbound.event is None:
+                replies.append(outbound)
+                await ch.send(outbound)
+        assert [reply.content for reply in replies] == ["normal answer"]
+        assert [post["json"]["method"] for post in ch._http.posts] == ["send"]
+        saved = await loop.sessions.state.read(f"signal:{chat_id}")
+        assert len([message for message in saved.messages if message["role"] == "user"]) == 1
+    finally:
+        release.set()
+        loop.stop()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 class TestSend:

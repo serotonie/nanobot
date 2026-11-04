@@ -814,32 +814,8 @@ class SignalChannel(BaseChannel):
             list(data_message.keys()),
         )
 
-        reaction: _SignalReaction | None = None
-        if "reaction" in data_message:
-            raw_reaction = _as_json_object(data_message["reaction"])
-            if raw_reaction is None:
-                raise ValueError("Signal reaction must be an object")
-            reaction = _parse_signal_reaction(
-                {
-                    "emoji": raw_reaction.get("emoji"),
-                    "target_author": (
-                        raw_reaction.get("targetAuthorNumber")
-                        or raw_reaction.get("targetAuthorUuid")
-                        or raw_reaction.get("targetAuthor")
-                    ),
-                    "target_timestamp": raw_reaction.get("targetSentTimestamp"),
-                    "remove": raw_reaction.get("isRemove", False),
-                }
-            )
-            action = "removed" if reaction["remove"] else "added"
-            message_text = (
-                f"[Signal reaction: {action} {reaction['emoji']} "
-                f"on message {reaction['target_timestamp']} "
-                f"by {reaction['target_author']}; passive notification, "
-                "do not react back or reply unless the user asks]"
-            )
-            attachments = []
-            mentions = []
+        # Reaction-only notifications have no actionable text/media. Keep them
+        # off the agent bus, including pairing replies and active-turn injection.
         if not message_text and not attachments:
             self.logger.debug("Ignoring empty message from {}", sender_number)
             return
@@ -858,7 +834,6 @@ class SignalChannel(BaseChannel):
             mentions=mentions,
             sender_name=sender_name,
             timestamp=timestamp,
-            reaction_target_author=reaction["target_author"] if reaction else None,
         )
         if not allowed:
             # Mirror Slack: let denied DMs reach the base-class
@@ -901,7 +876,6 @@ class SignalChannel(BaseChannel):
                     "group_id": group_id,
                     "message_text": message_text,
                     **({"quote": data_message["quote"]} if data_message.get("quote") else {}),
-                    **({"reaction": reaction} if reaction else {}),
                 },
                 is_dm=not is_group_message,
             )
@@ -920,7 +894,6 @@ class SignalChannel(BaseChannel):
         mentions: list[dict[str, Any]],
         sender_name: str | None,
         timestamp: int | None,
-        reaction_target_author: str | None = None,
     ) -> tuple[bool, str]:
         if is_group_message:
             chat_id = group_id or sender_number
@@ -948,10 +921,8 @@ class SignalChannel(BaseChannel):
             )
 
             is_command = bool(message_text and message_text.strip().startswith("/"))
-            targets_bot = self._id_matches_account(reaction_target_author)
             if (
                 not is_command
-                and not targets_bot
                 and not self._should_respond_in_group(message_text, mentions)
             ):
                 self.logger.info(

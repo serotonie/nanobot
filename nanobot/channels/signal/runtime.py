@@ -12,14 +12,18 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 from urllib.parse import quote
 
 import httpx
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 
 from nanobot.bus.delivery import ChannelNotReadyError
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import (
+    SIGNAL_REPLY_ONLY_SESSION_PREFIX,
+    InboundMessage,
+    OutboundMessage,
+)
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -336,6 +340,23 @@ class SignalDMConfig(Base):
     enabled: bool = True
     policy: str = "allowlist"  # "open" or "allowlist"
     allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers/UUIDs
+    owner: str | None = None
+    reply_only: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_reply_only(self) -> SignalDMConfig:
+        if self.owner is not None and (
+            not self.owner.strip() or self.owner.strip() == "*" or "|" in self.owner
+        ):
+            raise ValueError("dm.owner must be one Signal sender identifier")
+        if self.reply_only and not (self.owner and self.owner.strip()):
+            raise ValueError("dm.owner is required when dm.replyOnly is configured")
+        if any(not sender.strip() or sender.strip() == "*" for sender in self.reply_only):
+            raise ValueError("dm.replyOnly entries must be specific sender identifiers")
+        if self.owner is not None:
+            self.owner = self.owner.strip()
+        self.reply_only = [sender.strip() for sender in self.reply_only]
+        return self
 
 
 class SignalGroupConfig(Base):
@@ -462,6 +483,8 @@ class SignalChannel(BaseChannel):
         authorization_id: str | None = None,
         require_existing_session: bool = False,
         session_generation: str | None = None,
+        authorization_role: Literal["signal_reply_only"] | None = None,
+        reply_only_owner_chat_id: str | None = None,
     ) -> None:
         """Handle an inbound message whose policy has already been checked.
 
@@ -486,6 +509,8 @@ class SignalChannel(BaseChannel):
                 session_key_override=session_key,
                 session_generation=session_generation,
                 require_existing_session=require_existing_session,
+                authorization_role=authorization_role,
+                reply_only_owner_chat_id=reply_only_owner_chat_id,
             )
         )
 
@@ -848,6 +873,13 @@ class SignalChannel(BaseChannel):
         group_v2 = data_message.get("groupV2")
         is_group_message = group_info is not None or group_v2 is not None
         group_id = self._extract_group_id(group_info, group_v2)
+        reply_only_identity = self._reply_only_identity(sender_id)
+        if is_group_message and reply_only_identity is not None:
+            self.logger.info(
+                "Ignoring group message from reply-only sender {}",
+                sender_number,
+            )
+            return
 
         allowed, chat_id = self._check_inbound_policy(
             sender_id=sender_id,
@@ -865,12 +897,30 @@ class SignalChannel(BaseChannel):
             # _handle_message so it can reply with a pairing code.
             # Group denials stay dropped.
             if not is_group_message and self.config.dm.enabled:
-                await super()._handle_message(
-                    sender_id=sender_id,
-                    chat_id=chat_id,
-                    content="",
-                    is_dm=True,
-                )
+                if self.is_allowed(sender_id):
+                    await self._handle_message(
+                        sender_id=sender_id,
+                        chat_id=chat_id,
+                        content="",
+                        is_dm=True,
+                        session_key=(
+                            f"{SIGNAL_REPLY_ONLY_SESSION_PREFIX}{reply_only_identity.lower()}"
+                            if reply_only_identity is not None else None
+                        ),
+                        authorization_role=(
+                            "signal_reply_only" if reply_only_identity is not None else None
+                        ),
+                        reply_only_owner_chat_id=(
+                            self.config.dm.owner if reply_only_identity is not None else None
+                        ),
+                    )
+                else:
+                    await super()._handle_message(
+                        sender_id=sender_id,
+                        chat_id=chat_id,
+                        content="",
+                        is_dm=True,
+                    )
             return
 
         content, media_paths = await self._assemble_inbound_content(
@@ -904,6 +954,16 @@ class SignalChannel(BaseChannel):
                     **({"reaction": reaction} if reaction else {}),
                 },
                 is_dm=not is_group_message,
+                session_key=(
+                    f"{SIGNAL_REPLY_ONLY_SESSION_PREFIX}{reply_only_identity.lower()}"
+                    if reply_only_identity is not None else None
+                ),
+                authorization_role=(
+                    "signal_reply_only" if reply_only_identity is not None else None
+                ),
+                reply_only_owner_chat_id=(
+                    self.config.dm.owner if reply_only_identity is not None else None
+                ),
             )
         except Exception:
             await self._stop_typing(chat_id)
@@ -1181,6 +1241,15 @@ class SignalChannel(BaseChannel):
             if candidate and candidate not in parts:
                 parts.append(candidate)
         return parts
+
+    def _reply_only_identity(self, sender_id: str) -> str | None:
+        owner = self.config.dm.owner
+        if owner and self._sender_matches_allowlist(sender_id, [owner]):
+            return None
+        for configured_id in self.config.dm.reply_only:
+            if self._sender_matches_allowlist(sender_id, [configured_id]):
+                return configured_id.strip()
+        return None
 
     @staticmethod
     def _primary_sender_id(sender_parts: list[str]) -> str:

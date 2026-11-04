@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, TypedDict, TypeVar, cast
 from uuid import uuid4
 
+from nanobot.bus.events import SIGNAL_REPLY_ONLY_ROLE, SIGNAL_REPLY_ONLY_ROLE_META
 from nanobot.providers.base import ProviderConversationState
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
@@ -18,7 +19,11 @@ from nanobot.session.display_history import HistoryFact, HistoryReader
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META, is_hidden_history_message
 from nanobot.session.location import SessionLocation
 from nanobot.session.model_selection import SESSION_MODEL_PRESET_METADATA_KEY
-from nanobot.session.summary import SUMMARY_CONTINUATION_TEXT, is_summary_checkpoint
+from nanobot.session.summary import (
+    SUMMARY_CONTINUATION_TEXT,
+    has_untrusted_reply_only_summary,
+    is_summary_checkpoint,
+)
 from nanobot.session.types import PARENT_SESSION_KEY, SESSION_TYPE_KEY, SessionTypes
 from nanobot.utils.helpers import (
     content_with_media_breadcrumbs,
@@ -205,6 +210,11 @@ class Session:
         self.metadata["_last_summary"] = {
             "text": summary,
             "last_active": (last_active or self.updated_at).isoformat(),
+            **(
+                {"authorization_role": SIGNAL_REPLY_ONLY_ROLE}
+                if self.metadata.get(SIGNAL_REPLY_ONLY_ROLE_META) == SIGNAL_REPLY_ONLY_ROLE
+                else {}
+            ),
         }
         self.last_archived = boundary
 
@@ -223,7 +233,8 @@ class Session:
         is not a user request and must not resume an old task on the next turn.
         A positive ``max_messages`` applies an additional caller-owned count limit.
         """
-        replayable = self.messages[self.last_archived:]
+        archive_start = 0 if has_untrusted_reply_only_summary(self.metadata) else self.last_archived
+        replayable = self.messages[archive_start:]
         if max_messages <= 0:
             start_idx = 0
         else:

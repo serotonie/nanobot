@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 
@@ -59,6 +60,75 @@ def test_get_definitions_orders_builtins_then_mcp_tools() -> None:
         "mcp_fs_list",
         "mcp_git_status",
     ]
+
+
+def test_signal_reply_only_registry_exposes_and_authorizes_only_owner_message_tool() -> None:
+    registry = _registry_with_names([
+        "message",
+        "read_file",
+        "read_session",
+        "search_sessions",
+        "send_session_message",
+        "self",
+        "cron",
+        "subagent",
+        "mcp_private",
+    ])
+    context = RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        authorization_role="signal_reply_only",
+        reply_only_owner_chat_id="+19995550002",
+    )
+
+    with request_context(context):
+        assert _tool_names(registry.get_definitions()) == ["message"]
+        for name in (
+            "read_file",
+            "read_session",
+            "search_sessions",
+            "send_session_message",
+            "self",
+            "cron",
+            "subagent",
+            "mcp_private",
+        ):
+            tool, _params, error = registry.prepare_call(name, {})
+            assert tool is None
+            assert error is not None
+            assert "not available to Signal reply-only senders" in error
+
+
+def test_signal_reply_only_registry_fails_closed_without_owner_delivery_target() -> None:
+    registry = _registry_with_names(["message", "read_file"])
+    context = RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        authorization_role="signal_reply_only",
+    )
+
+    with request_context(context):
+        assert registry.get_definitions() == []
+        _tool, _params, error = registry.prepare_call("message", {})
+        assert error is not None
+        assert "not available to Signal reply-only senders" in error
+
+
+def test_signal_reply_only_registry_does_not_resolve_shared_runtime_context_providers() -> None:
+    registry = _registry_with_names(["mcp_private"])
+    provider = AsyncMock()
+    tool = registry.get("mcp_private")
+    assert tool is not None
+    tool.runtime_context_provider = lambda: provider
+
+    with request_context(RequestContext(
+        channel="signal",
+        chat_id="+19995550001",
+        authorization_role="signal_reply_only",
+        reply_only_owner_chat_id="+19995550002",
+    )):
+        assert registry.get_runtime_context_providers() == []
+    provider.assert_not_called()
 
 
 def test_prepare_call_rejects_near_miss_tool_name_with_suggestion() -> None:

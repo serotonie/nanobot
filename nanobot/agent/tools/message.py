@@ -163,6 +163,8 @@ class MessageTool(Tool):
     def description(self) -> str:
         return (
             "Send separate messages requested by the user or task, optionally with attachments. "
+            "On Signal reply-only turns, call with content only to send a report to the configured owner; "
+            "other destinations and options are not available. "
             "For normal replies, including scheduled reminders and reports, answer directly; "
             "the final reply is delivered to the current chat automatically. "
             "Use this tool to deliver generated images via media."
@@ -216,6 +218,24 @@ class MessageTool(Tool):
                 return ToolResult.error("Error: buttons must be a list of list of strings")
             button_rows = cast(list[list[str]], raw_buttons)
         request_ctx = current_request_context()
+        if request_ctx is not None and request_ctx.authorization_role == "signal_reply_only":
+            if not request_ctx.reply_only_owner_chat_id:
+                return ToolResult.error("Error: owner delivery is not configured")
+            if (
+                channel is not None
+                or chat_id is not None
+                or message_id is not None
+                or media
+                or buttons is not None
+                or reaction is not None
+                or quote is not None
+                or kwargs
+            ):
+                return ToolResult.error(
+                    "Error: Signal reply-only senders may only report text to the configured owner"
+                )
+            channel = "signal"
+            chat_id = request_ctx.reply_only_owner_chat_id
         default_channel = (
             request_ctx.channel if request_ctx is not None else self._fallback_channel
         )

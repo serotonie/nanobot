@@ -21,6 +21,10 @@ RUNTIME_CONTROL_SESSION_DISCARD = "session_discard"
 # Transport-provided turn correlation; the persisted spelling is retained for clients.
 INBOUND_META_TURN_ID = "webui_turn_id"
 INBOUND_META_LOCAL_MEDIA = "local_media_paths"
+SIGNAL_REPLY_ONLY_SESSION_PREFIX = "signal:reply-only:"
+SIGNAL_REPLY_ONLY_ROLE_META = "_signal_reply_only_role"
+SIGNAL_REPLY_ONLY_OWNER_META = "_signal_reply_only_owner"
+SIGNAL_REPLY_ONLY_ROLE = "signal_reply_only"
 
 
 @dataclass
@@ -38,6 +42,8 @@ class InboundMessage:
     require_existing_session: bool = False
     input_role: Literal["user", "system"] | None = None
     session_generation: str | None = None  # Trusted identity assigned at session admission
+    authorization_role: Literal["signal_reply_only"] | None = None
+    reply_only_owner_chat_id: str | None = None
 
     @property
     def session_key(self) -> str:

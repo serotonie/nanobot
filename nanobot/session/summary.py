@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypedDict, cast
 
+from loguru import logger
+
+from nanobot.bus.events import SIGNAL_REPLY_ONLY_ROLE, SIGNAL_REPLY_ONLY_ROLE_META
 from nanobot.session.history_visibility import is_hidden_history_message
 
 SUMMARY_CONTINUATION_TEXT = (
@@ -32,11 +35,27 @@ class SessionSummaryCheckpoint:
     transcript_boundary: int
 
 
+def has_untrusted_reply_only_summary(metadata: Mapping[str, object] | None) -> bool:
+    if metadata is None or metadata.get(SIGNAL_REPLY_ONLY_ROLE_META) != SIGNAL_REPLY_ONLY_ROLE:
+        return False
+    raw = metadata.get("_last_summary")
+    if not isinstance(raw, Mapping):
+        return False
+    summary_data = cast(Mapping[str, object], raw)
+    return summary_data.get("authorization_role") != SIGNAL_REPLY_ONLY_ROLE
+
+
 def session_summary_from_metadata(
     metadata: Mapping[str, object] | None,
     *,
     fallback_last_active: datetime,
 ) -> SessionSummary | None:
+    if has_untrusted_reply_only_summary(metadata):
+        logger.warning(
+            "Ignoring a legacy reply-only summary without isolated-context provenance; "
+            "replaying the original transcript until the next compaction"
+        )
+        return None
     raw: object = metadata.get("_last_summary") if metadata is not None else None
     if not isinstance(raw, Mapping):
         return None

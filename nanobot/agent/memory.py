@@ -18,13 +18,18 @@ from uuid import uuid4
 
 from loguru import logger
 
+from nanobot.bus.events import SIGNAL_REPLY_ONLY_ROLE, SIGNAL_REPLY_ONLY_ROLE_META
 from nanobot.events import NO_EVENTS, CompactionReason, ContextCompactionEvent, EventSink
 from nanobot.llm_usage.context import llm_usage_source
 from nanobot.providers.base import LLMResponse, ProviderConversationState
 from nanobot.providers.conversation_state import ProviderConversationStateController
 from nanobot.runtime_context import public_history_messages
 from nanobot.session.manager import Session, SessionManager
-from nanobot.session.summary import is_summary_checkpoint, session_summary_from_metadata
+from nanobot.session.summary import (
+    has_untrusted_reply_only_summary,
+    is_summary_checkpoint,
+    session_summary_from_metadata,
+)
 from nanobot.utils.gitstore import GitStore
 from nanobot.utils.helpers import (
     atomic_write_lines,
@@ -964,12 +969,18 @@ class MemoryArchiver:
         input_token_budget: int,
     ) -> str | None:
         """Archive a captured session prefix without mutating the session."""
+        archive_start = (
+            0 if has_untrusted_reply_only_summary(session.metadata) else session.last_archived
+        )
         messages = [
-            message for message in session.messages[session.last_archived:archive_end]
+            message for message in session.messages[archive_start:archive_end]
             if not message.get("_command") and not is_summary_checkpoint(message)
         ]
         if not messages:
             return None
+        reply_only = (
+            session.metadata.get(SIGNAL_REPLY_ONLY_ROLE_META) == SIGNAL_REPLY_ONLY_ROLE
+        )
         session_summary = session_summary_from_metadata(
             session.metadata,
             fallback_last_active=session.updated_at,
@@ -986,11 +997,12 @@ class MemoryArchiver:
                 session_key=session.key,
                 previous_summary=previous_summary,
                 max_tokens=runtime.generation.max_tokens,
+                persist=not reply_only,
             )
         prefix = Session(
             key=session.key,
             messages=list(session.messages[:archive_end]),
-            last_consolidated=session.last_archived,
+            last_consolidated=archive_start,
         )
         history = prefix.get_history(max_tokens=input_token_budget)
         archive_history = Session(
@@ -1007,6 +1019,7 @@ class MemoryArchiver:
                 session_key=session.key,
                 previous_summary=previous_summary,
                 max_tokens=runtime.generation.max_tokens,
+                persist=not reply_only,
             )
         channel = session.key.split(":", 1)[0] if ":" in session.key else None
         workspace: Path | None = None
@@ -1018,8 +1031,9 @@ class MemoryArchiver:
             channel=channel,
             session_summary=session_summary,
             workspace=workspace,
+            include_shared_context=not reply_only,
         )
-        tools = self._get_tool_definitions()
+        tools = [] if reply_only else self._get_tool_definitions()
         return await self.archive(
             messages,
             runtime=runtime,
@@ -1028,6 +1042,7 @@ class MemoryArchiver:
             request_tools=tools,
             previous_summary=previous_summary,
             input_token_budget=input_token_budget,
+            persist=not reply_only,
         )
 
 

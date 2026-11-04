@@ -117,6 +117,7 @@ class AgentRunSpec:
     terminal_injection_callback: InjectionCallback | None = None
     continuation_callback: ContinuationCallback | None = None
     finalize_on_max_iterations: bool = True
+    response_optional: bool = False
     provider_state: ProviderConversationState | None = None
     llm_usage_source: LLMUsageSource | None = None
     events: EventSink = NO_EVENTS
@@ -627,6 +628,7 @@ class AgentRunner:
                 response.finish_reason
                 not in {"error", "length", "refusal", "content_filter"}
                 and is_blank_text(clean)
+                and not spec.response_optional
             ):
                 empty_content_retries += 1
                 if empty_content_retries < _MAX_EMPTY_RETRIES:
@@ -791,6 +793,14 @@ class AgentRunner:
                 failure_error_kind = LLMProvider.public_error_kind(response)
                 break
             if is_blank_text(clean):
+                if (
+                    spec.response_optional
+                    and response.finish_reason not in {"length", "refusal", "content_filter"}
+                ):
+                    stop_reason = "no_response"
+                    context.stop_reason = stop_reason
+                    await hook.after_iteration(context)
+                    break
                 final_content = EMPTY_FINAL_RESPONSE_MESSAGE
                 stop_reason = "empty_final_response"
                 error = final_content
@@ -859,7 +869,9 @@ class AgentRunner:
                 )
             if terminal_content is None:
                 terminal_content = self._max_iterations_fallback(spec)
-            if length_recovery_parts:
+            if spec.response_optional and terminal_content == "" and not length_recovery_parts:
+                stop_reason = "no_response"
+            elif length_recovery_parts:
                 terminal_tail = f"\n\n{terminal_content.lstrip()}"
                 final_content = (
                     "".join(length_recovery_parts).rstrip() + terminal_tail
@@ -867,7 +879,8 @@ class AgentRunner:
                 pending_stream_content = terminal_tail
             else:
                 final_content = terminal_content
-            self._append_final_message(messages, terminal_content)
+            if terminal_content:
+                self._append_final_message(messages, terminal_content)
 
         return AgentRunResult(
             final_content=final_content,
@@ -1231,6 +1244,10 @@ class AgentRunner:
         compaction = request_state.compaction
         request_messages = await self.prepare_prompt(compaction.request_messages, messages)
         retry_messages = self._budget_exhausted_finalization_messages(request_messages)
+        if spec.response_optional:
+            retry_messages[-1]["content"] += (
+                " If no user-visible reply is warranted, finish with empty content."
+            )
         try:
             response = await self._request_no_tools(
                 spec,
@@ -1267,6 +1284,11 @@ class AgentRunner:
         )
         clean = hook.finalize_content(context, response.content)
         if is_blank_text(clean):
+            if (
+                spec.response_optional
+                and response.finish_reason not in {"length", "refusal", "content_filter"}
+            ):
+                return "", usage
             return None, usage
         return clean, usage
 

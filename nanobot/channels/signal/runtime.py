@@ -486,6 +486,7 @@ class SignalChannel(BaseChannel):
                 session_key_override=session_key,
                 session_generation=session_generation,
                 require_existing_session=require_existing_session,
+                response_optional="reaction" in meta,
             )
         )
 
@@ -814,8 +815,26 @@ class SignalChannel(BaseChannel):
             list(data_message.keys()),
         )
 
-        # Reaction-only notifications have no actionable text/media. Keep them
-        # off the agent bus, including pairing replies and active-turn injection.
+        reaction: _SignalReaction | None = None
+        if "reaction" in data_message and not message_text and not attachments:
+            raw_reaction = _as_json_object(data_message["reaction"])
+            if raw_reaction is None:
+                raise ValueError("Signal reaction must be an object")
+            reaction = _parse_signal_reaction(
+                {
+                    "emoji": raw_reaction.get("emoji"),
+                    "target_author": (
+                        raw_reaction.get("targetAuthorNumber")
+                        or raw_reaction.get("targetAuthorUuid")
+                        or raw_reaction.get("targetAuthor")
+                    ),
+                    "target_timestamp": raw_reaction.get("targetSentTimestamp"),
+                    "remove": raw_reaction.get("isRemove", False),
+                }
+            )
+            message_text = f"[Signal reaction feedback: {json.dumps(reaction, ensure_ascii=False)}]"
+            mentions = []
+
         if not message_text and not attachments:
             self.logger.debug("Ignoring empty message from {}", sender_number)
             return
@@ -834,12 +853,13 @@ class SignalChannel(BaseChannel):
             mentions=mentions,
             sender_name=sender_name,
             timestamp=timestamp,
+            reaction_target_author=reaction["target_author"] if reaction else None,
         )
         if not allowed:
             # Mirror Slack: let denied DMs reach the base-class
             # _handle_message so it can reply with a pairing code.
             # Group denials stay dropped.
-            if not is_group_message and self.config.dm.enabled:
+            if reaction is None and not is_group_message and self.config.dm.enabled:
                 await super()._handle_message(
                     sender_id=sender_id,
                     chat_id=chat_id,
@@ -858,10 +878,20 @@ class SignalChannel(BaseChannel):
             chat_id=chat_id,
             quoted_message=_as_json_object(data_message.get("quote")),
         )
+        if reaction is not None:
+            content += (
+                "\nEvaluate this reaction in conversation context and decide whether any action "
+                "or reply is warranted. Emoji meanings are contextual, not fixed commands. "
+                "A removal withdraws the reaction; it is not the opposite sentiment. "
+                "Do not invent the target message's text if it is unavailable. "
+                "Do not automatically mirror the reaction or acknowledge it. "
+                "If no reply is needed, finish with empty content."
+            )
 
         self.logger.debug("Received Signal message from {}", sender_number)
 
-        await self._start_typing(chat_id)
+        if reaction is None:
+            await self._start_typing(chat_id)
         try:
             await self._handle_message(
                 sender_id=sender_id,
@@ -876,6 +906,7 @@ class SignalChannel(BaseChannel):
                     "group_id": group_id,
                     "message_text": message_text,
                     **({"quote": data_message["quote"]} if data_message.get("quote") else {}),
+                    **({"reaction": reaction} if reaction else {}),
                 },
                 is_dm=not is_group_message,
             )
@@ -894,6 +925,7 @@ class SignalChannel(BaseChannel):
         mentions: list[dict[str, Any]],
         sender_name: str | None,
         timestamp: int | None,
+        reaction_target_author: str | None = None,
     ) -> tuple[bool, str]:
         if is_group_message:
             chat_id = group_id or sender_number
@@ -923,6 +955,7 @@ class SignalChannel(BaseChannel):
             is_command = bool(message_text and message_text.strip().startswith("/"))
             if (
                 not is_command
+                and not self._id_matches_account(reaction_target_author)
                 and not self._should_respond_in_group(message_text, mentions)
             ):
                 self.logger.info(

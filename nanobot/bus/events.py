@@ -38,6 +38,7 @@ class InboundMessage:
     require_existing_session: bool = False
     input_role: Literal["user", "system"] | None = None
     session_generation: str | None = None  # Trusted identity assigned at session admission
+    response_optional: bool = False  # Independent evaluation that may finish without a reply
 
     @property
     def session_key(self) -> str:

@@ -952,6 +952,32 @@ async def test_empty_finalization_retry_discards_candidate_provider_state():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_iterations", [1, 3])
+async def test_optional_blank_continuation_preserves_existing_reply(max_iterations):
+    from nanobot.agent.runner import AgentRunner
+
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content="I will recheck that answer.", finish_reason="length"),
+        LLMResponse(content="", finish_reason="stop"),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, tools=tools, model="test-model", max_iterations=max_iterations,
+        initial_messages=[{"role": "user", "content": "Reaction feedback: 👎"}],
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        response_optional=True,
+    ))
+
+    assert result.final_content == "I will recheck that answer."
+    assert result.stop_reason == ("max_iterations" if max_iterations == 1 else "completed")
+    assert result.error is None
+    assert provider.chat_stream_with_retry.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_runner_length_recovery_returns_all_segments():
     from nanobot.agent.runner import AgentRunner
 

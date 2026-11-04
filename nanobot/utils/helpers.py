@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import shutil
@@ -360,12 +361,26 @@ _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 _TOOL_RESULTS_DIR = ".nanobot/tool-results"
 _TOOL_RESULT_RETENTION_SECS = 7 * 24 * 60 * 60
 _TOOL_RESULT_MAX_BUCKETS = 32
+# file_io.write_text_atomic adds .<filename>.<32 hex chars>.tmp (38 bytes).
+_TOOL_RESULT_STEM_MAX_BYTES = 255 - len(".txt") - 38
 _TRUNCATED_SUFFIX = "\n... (truncated)"
 
 
 def safe_filename(name: str) -> str:
     """Replace unsafe path characters with underscores."""
     return _UNSAFE_CHARS.sub("_", name).strip()
+
+
+def _tool_result_component(name: str, *, max_bytes: int = 255) -> str:
+    """Keep ordinary names, hash lossy/oversized names in a reserved namespace."""
+    if (
+        name not in ("", ".", "..")
+        and not name.startswith("~")
+        and safe_filename(name) == name
+        and len(name.encode("utf-8")) <= max_bytes
+    ):
+        return name
+    return "~" + hashlib.sha256(name.encode("utf-8")).hexdigest()
 
 
 def image_placeholder_text(path: str | None, *, empty: str = "[image]") -> str:
@@ -561,12 +576,13 @@ def maybe_persist_tool_result(
         return content
 
     root = ensure_dir(workspace / _TOOL_RESULTS_DIR)
-    bucket = ensure_dir(root / safe_filename(session_key or "default"))
+    bucket = ensure_dir(root / _tool_result_component(session_key or "default"))
     try:
         _cleanup_tool_result_buckets(root, bucket)
     except Exception:
         logger.exception("Failed to clean stale tool result buckets in {}", root)
-    path = bucket / f"{safe_filename(tool_call_id)}.txt"
+    stem = _tool_result_component(tool_call_id, max_bytes=_TOOL_RESULT_STEM_MAX_BYTES)
+    path = bucket / f"{stem}.txt"
     if not path.exists():
         _write_text_atomic(path, content)
 

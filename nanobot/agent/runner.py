@@ -797,7 +797,9 @@ class AgentRunner:
                     spec.response_optional
                     and response.finish_reason not in {"length", "refusal", "content_filter"}
                 ):
-                    stop_reason = "no_response"
+                    final_content = "".join(length_recovery_parts).strip() or None
+                    stop_reason = "completed" if final_content else "no_response"
+                    context.final_content = final_content
                     context.stop_reason = stop_reason
                     await hook.after_iteration(context)
                     break
@@ -869,7 +871,11 @@ class AgentRunner:
                 )
             if terminal_content is None:
                 terminal_content = self._max_iterations_fallback(spec)
-            if spec.response_optional and terminal_content == "" and not length_recovery_parts:
+            if (
+                spec.response_optional
+                and terminal_content == ""
+                and is_blank_text("".join(length_recovery_parts))
+            ):
                 stop_reason = "no_response"
             elif length_recovery_parts:
                 terminal_tail = f"\n\n{terminal_content.lstrip()}"

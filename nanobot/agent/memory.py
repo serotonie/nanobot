@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from nanobot.bus.events import SIGNAL_REPLY_ONLY_ROLE, SIGNAL_REPLY_ONLY_ROLE_META
 from nanobot.events import NO_EVENTS, CompactionReason, ContextCompactionEvent, EventSink
 from nanobot.llm_usage.context import llm_usage_source
 from nanobot.providers.base import LLMResponse, ProviderConversationState
@@ -970,6 +971,9 @@ class MemoryArchiver:
         ]
         if not messages:
             return None
+        reply_only = (
+            session.metadata.get(SIGNAL_REPLY_ONLY_ROLE_META) == SIGNAL_REPLY_ONLY_ROLE
+        )
         session_summary = session_summary_from_metadata(
             session.metadata,
             fallback_last_active=session.updated_at,
@@ -986,6 +990,7 @@ class MemoryArchiver:
                 session_key=session.key,
                 previous_summary=previous_summary,
                 max_tokens=runtime.generation.max_tokens,
+                persist=not reply_only,
             )
         prefix = Session(
             key=session.key,
@@ -1007,6 +1012,7 @@ class MemoryArchiver:
                 session_key=session.key,
                 previous_summary=previous_summary,
                 max_tokens=runtime.generation.max_tokens,
+                persist=not reply_only,
             )
         channel = session.key.split(":", 1)[0] if ":" in session.key else None
         workspace: Path | None = None
@@ -1018,8 +1024,9 @@ class MemoryArchiver:
             channel=channel,
             session_summary=session_summary,
             workspace=workspace,
+            include_shared_context=not reply_only,
         )
-        tools = self._get_tool_definitions()
+        tools = [] if reply_only else self._get_tool_definitions()
         return await self.archive(
             messages,
             runtime=runtime,
@@ -1028,6 +1035,7 @@ class MemoryArchiver:
             request_tools=tools,
             previous_summary=previous_summary,
             input_token_budget=input_token_budget,
+            persist=not reply_only,
         )
 
 

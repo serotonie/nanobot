@@ -529,6 +529,43 @@ class TestConsolidatorArchiveErrorHandling:
         mock_provider.chat_stream_with_retry.assert_not_awaited()
         consolidator.store.raw_archive.assert_not_called()
 
+    async def test_reply_only_archive_keeps_summary_and_skips_shared_context_and_journal(
+        self, consolidator, mock_provider, runtime
+    ):
+        runtime = replace(runtime, context_window_tokens=128_000)
+        mock_provider.chat_stream_with_retry.return_value = LLMResponse(
+            content="sender conversation checkpoint",
+        )
+        build_messages = MagicMock(return_value=[{"role": "system", "content": "private prompt"}])
+        consolidator.archiver._build_messages = build_messages
+        consolidator.archiver._get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "owner_tool"}}],
+        )
+        session = Session(key="signal:reply-only:trusted-sender")
+        session.metadata.update({
+            "_signal_reply_only_role": "signal_reply_only",
+            "_signal_reply_only_owner": "+19995550002",
+            "_last_summary": {
+                "text": "sender archived conversation",
+                "last_active": session.updated_at.isoformat(),
+            },
+        })
+        session.add_message("user", "new sender message")
+
+        summary = await consolidator.archive_session(
+            session,
+            archive_end=len(session.messages),
+            runtime=runtime,
+        )
+
+        assert summary == "sender conversation checkpoint"
+        assert build_messages.call_args.kwargs["session_summary"]["text"] == (
+            "sender archived conversation"
+        )
+        assert build_messages.call_args.kwargs["include_shared_context"] is False
+        assert mock_provider.chat_stream_with_retry.await_args.kwargs["tools"] == []
+        assert not consolidator.store.history_file.exists()
+
 
 class TestConsolidatorPromptEstimate:
     async def test_estimate_uses_full_unarchived_tail(self, consolidator, runtime):

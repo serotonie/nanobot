@@ -22,6 +22,9 @@ RUNTIME_CONTROL_SESSION_DISCARD = "session_discard"
 INBOUND_META_TURN_ID = "webui_turn_id"
 INBOUND_META_LOCAL_MEDIA = "local_media_paths"
 SIGNAL_REPLY_ONLY_SESSION_PREFIX = "signal:reply-only:"
+SIGNAL_REPLY_ONLY_ROLE_META = "_signal_reply_only_role"
+SIGNAL_REPLY_ONLY_OWNER_META = "_signal_reply_only_owner"
+SIGNAL_REPLY_ONLY_ROLE = "signal_reply_only"
 
 
 @dataclass

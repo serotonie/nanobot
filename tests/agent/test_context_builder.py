@@ -170,6 +170,10 @@ def test_reply_only_transcript_excludes_shared_workspace_context(tmp_path):
         TranscriptInput(
             history=[{"role": "user", "content": "sender's prior message"}],
             current_message="What is two plus two?",
+            session_summary={
+                "text": "sender's archived conversation",
+                "last_active": "2026-11-04T12:00:00",
+            },
             runtime_context_blocks=[
                 RuntimeContextBlock(source="owner", content="owner private runtime context"),
             ],
@@ -180,6 +184,7 @@ def test_reply_only_transcript_excludes_shared_workspace_context(tmp_path):
     assert transcript[0]["role"] == "system"
     assert "private owner instructions" not in transcript[0]["content"]
     assert "private owner profile" not in transcript[0]["content"]
+    assert "sender's archived conversation" in transcript[0]["content"]
     assert "owner private runtime context" not in str(transcript)
     assert "sender's prior message" in transcript[1]["content"]
     assert "What is two plus two?" in transcript[2]["content"]

@@ -1022,6 +1022,34 @@ class TestHandleDataMessageDM:
         assert ch.is_allowed("+19995559999") is False
 
     @pytest.mark.asyncio
+    async def test_paired_reply_only_dm_keeps_role_and_isolated_session(self, monkeypatch):
+        sender = "+19995550002"
+        monkeypatch.setattr(
+            "nanobot.channels.signal.runtime.is_approved",
+            lambda channel, sender_id: sender_id in {sender, sender.removeprefix("+")},
+        )
+        ch = _make_channel(
+            dm_enabled=True,
+            dm_policy="allowlist",
+            dm_allow_from=[],
+            dm_owner="+19995550003",
+            dm_reply_only=[sender],
+        )
+        published: list[InboundMessage] = []
+
+        async def capture_publish(message: InboundMessage):
+            published.append(message)
+
+        ch.bus.publish_inbound = capture_publish  # type: ignore[method-assign]
+
+        await ch._handle_receive_notification(_dm_envelope(source_number=sender))
+
+        assert len(published) == 1
+        assert published[0].authorization_role == "signal_reply_only"
+        assert published[0].reply_only_owner_chat_id == "+19995550003"
+        assert published[0].session_key == f"signal:reply-only:{sender}"
+
+    @pytest.mark.asyncio
     async def test_dm_allowlist_matches_without_plus_prefix(self):
         ch, handled = self._make_dm_channel(policy="allowlist", allow_from=["19995550001"])
         params = _dm_envelope(source_number="+19995550001")

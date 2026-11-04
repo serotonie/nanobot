@@ -93,12 +93,20 @@ class ContextBuilder:
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         if not include_shared_context:
-            return (
+            prompt = (
                 "You are a private Signal reply-only assistant. Answer the sender's "
                 "messages normally. Do not claim access to private files, memory, or "
                 "other conversations. The only available tool reports text to the "
                 "configured owner."
             )
+            if session_summary and session_summary["text"] != "(nothing)":
+                prompt += (
+                    "\n\n[Archived Context Summary]\n\n"
+                    "Previous conversation summary "
+                    f"(last active {session_summary['last_active']}):\n"
+                    f"{session_summary['text']}"
+                )
+            return prompt
         root = workspace or self.workspace
         parts = [self._get_identity(channel=channel, workspace=root)]
 
@@ -231,6 +239,7 @@ class ContextBuilder:
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
         workspace: Path | None = None,
         include_memory: bool = True,
+        include_shared_context: bool = True,
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper for callers that need merged adjacent roles."""
         messages = self.build_transcript(
@@ -245,6 +254,7 @@ class ContextBuilder:
             channel=channel,
             workspace=workspace,
             include_memory=include_memory,
+            include_shared_context=include_shared_context,
         )
         if current_message is None:
             return messages

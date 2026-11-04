@@ -897,12 +897,30 @@ class SignalChannel(BaseChannel):
             # _handle_message so it can reply with a pairing code.
             # Group denials stay dropped.
             if not is_group_message and self.config.dm.enabled:
-                await super()._handle_message(
-                    sender_id=sender_id,
-                    chat_id=chat_id,
-                    content="",
-                    is_dm=True,
-                )
+                if self.is_allowed(sender_id):
+                    await self._handle_message(
+                        sender_id=sender_id,
+                        chat_id=chat_id,
+                        content="",
+                        is_dm=True,
+                        session_key=(
+                            f"{SIGNAL_REPLY_ONLY_SESSION_PREFIX}{reply_only_identity.lower()}"
+                            if reply_only_identity is not None else None
+                        ),
+                        authorization_role=(
+                            "signal_reply_only" if reply_only_identity is not None else None
+                        ),
+                        reply_only_owner_chat_id=(
+                            self.config.dm.owner if reply_only_identity is not None else None
+                        ),
+                    )
+                else:
+                    await super()._handle_message(
+                        sender_id=sender_id,
+                        chat_id=chat_id,
+                        content="",
+                        is_dm=True,
+                    )
             return
 
         content, media_paths = await self._assemble_inbound_content(

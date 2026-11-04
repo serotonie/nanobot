@@ -548,6 +548,7 @@ class TestConsolidatorArchiveErrorHandling:
             "_last_summary": {
                 "text": "sender archived conversation",
                 "last_active": session.updated_at.isoformat(),
+                "authorization_role": "signal_reply_only",
             },
         })
         session.add_message("user", "new sender message")
@@ -565,6 +566,56 @@ class TestConsolidatorArchiveErrorHandling:
         assert build_messages.call_args.kwargs["include_shared_context"] is False
         assert mock_provider.chat_stream_with_retry.await_args.kwargs["tools"] == []
         assert not consolidator.store.history_file.exists()
+
+    @pytest.mark.parametrize("input_token_budget", [0, 100_000])
+    async def test_reply_only_archive_rebuilds_legacy_summary_without_replaying_it(
+        self, consolidator, mock_provider, runtime, input_token_budget,
+    ):
+        from nanobot.agent.context import ContextBuilder
+        from nanobot.session.summary import session_summary_from_metadata
+
+        runtime = replace(runtime, context_window_tokens=128_000)
+        builder = ContextBuilder(consolidator.store.workspace)
+        builder.memory.write_memory("private owner memory")
+        consolidator.archiver._build_messages = builder.build_messages
+        mock_provider.chat_stream_with_retry.return_value = LLMResponse(
+            content="isolated sender checkpoint",
+        )
+        session = Session(key="signal:reply-only:trusted-sender")
+        session.metadata["_signal_reply_only_role"] = "signal_reply_only"
+        session.add_message("user", "sender's original answer")
+        session.commit_summary_checkpoint("private owner data in legacy summary")
+        session.metadata["_last_summary"].pop("authorization_role")
+        session.add_message("user", "sender's new question")
+
+        assert session_summary_from_metadata(
+            session.metadata, fallback_last_active=session.updated_at,
+        ) is None
+        assert "sender's original answer" in str(session.get_history())
+
+        summary = await consolidator.archiver.archive_session(
+            session, archive_end=len(session.messages), runtime=runtime,
+            input_token_budget=input_token_budget,
+        )
+
+        if input_token_budget:
+            request = mock_provider.chat_stream_with_retry.await_args.kwargs
+            assert "sender's original answer" in str(request["messages"])
+            assert "sender's new question" in str(request["messages"])
+            assert "private owner" not in str(request["messages"])
+            assert request["tools"] == []
+        else:
+            mock_provider.chat_stream_with_retry.assert_not_awaited()
+            assert "sender's original answer" in summary
+            assert "private owner" not in summary
+        assert not consolidator.store.history_file.exists()
+        session.commit_summary_checkpoint(summary)
+        stored = session_summary_from_metadata(
+            session.metadata, fallback_last_active=session.updated_at,
+        )
+        assert stored is not None
+        assert stored["text"] == summary
+        assert "sender's original answer" not in str(session.get_history())
 
 
 class TestConsolidatorPromptEstimate:

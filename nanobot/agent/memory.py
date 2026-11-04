@@ -25,7 +25,11 @@ from nanobot.providers.base import LLMResponse, ProviderConversationState
 from nanobot.providers.conversation_state import ProviderConversationStateController
 from nanobot.runtime_context import public_history_messages
 from nanobot.session.manager import Session, SessionManager
-from nanobot.session.summary import is_summary_checkpoint, session_summary_from_metadata
+from nanobot.session.summary import (
+    has_untrusted_reply_only_summary,
+    is_summary_checkpoint,
+    session_summary_from_metadata,
+)
 from nanobot.utils.gitstore import GitStore
 from nanobot.utils.helpers import (
     atomic_write_lines,
@@ -965,8 +969,11 @@ class MemoryArchiver:
         input_token_budget: int,
     ) -> str | None:
         """Archive a captured session prefix without mutating the session."""
+        archive_start = (
+            0 if has_untrusted_reply_only_summary(session.metadata) else session.last_archived
+        )
         messages = [
-            message for message in session.messages[session.last_archived:archive_end]
+            message for message in session.messages[archive_start:archive_end]
             if not message.get("_command") and not is_summary_checkpoint(message)
         ]
         if not messages:
@@ -995,7 +1002,7 @@ class MemoryArchiver:
         prefix = Session(
             key=session.key,
             messages=list(session.messages[:archive_end]),
-            last_consolidated=session.last_archived,
+            last_consolidated=archive_start,
         )
         history = prefix.get_history(max_tokens=input_token_budget)
         archive_history = Session(

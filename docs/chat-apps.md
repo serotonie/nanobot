@@ -1092,6 +1092,8 @@ Reply-only access is an explicit per-sender restriction for private DMs. The sen
 
 `dm.owner` is the fixed Signal destination for reports, and `dm.replyOnly` is an empty list by default. Entries match trusted Signal envelope identifiers (phone number, UUID, service ID, or ACI); display names and message text are never used for authorization. A reply-only sender receives a separate conversation context without the owner's memory, workspace bootstrap files, skills, history, or privileged tools. They can chat normally and ask the agent to report text to the configured owner; the report tool accepts no recipient, channel, attachment, or other routing options. Groups are not assigned this role.
 
+Reply-only archives keep the sender's own summary in that session and do not write to the shared memory journal. Summaries created by earlier reply-only implementations without isolated-context provenance are not replayed; the original sender transcript is replayed instead and rebuilt into an isolated summary at the next compaction. Existing transcript files are not deleted or rewritten by this compatibility handling.
+
 To activate the role, add only the intended sender identifiers and owner ID, then restart the gateway. To roll back, remove `dm.replyOnly` (and `dm.owner` if unused) and restart; new messages then follow the existing DM policy and use its normal conversation. An interrupted reply-only session remains restricted if it is resumed. With `dm.policy: "open"` or a wildcard allowlist, unconfigured senders retain the existing full-access behavior, so use an allowlist if that is not intended. For an allowlist rollback that should deny the sender entirely, also remove their `dm.allowFrom` entry and pairing approval.
 
 **Reactions (tapbacks)**

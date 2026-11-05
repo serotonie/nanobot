@@ -1509,7 +1509,7 @@ async def test_group_reactions_follow_access_and_addressing_policy(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_group", [False, True])
-@pytest.mark.parametrize("remove", [False, True])
+@pytest.mark.parametrize("feedback_kind", ["reaction", "reaction_removal", "emoji_message"])
 @pytest.mark.parametrize("active", [False, True])
 @pytest.mark.parametrize(
     ("emoji", "response", "finish_reason"),
@@ -1520,8 +1520,8 @@ async def test_group_reactions_follow_access_and_addressing_policy(
         ("👍", "Provider unavailable", "error"),
     ],
 )
-async def test_reaction_evaluated_in_independent_turn(
-    tmp_path, is_group, remove, active, emoji, response, finish_reason,
+async def test_feedback_evaluated_in_independent_turn(
+    tmp_path, is_group, feedback_kind, active, emoji, response, finish_reason,
 ):
     from nanobot.agent.loop import AgentLoop
 
@@ -1548,13 +1548,16 @@ async def test_reaction_evaluated_in_independent_turn(
     loop = AgentLoop(bus=ch.bus, provider=provider, workspace=tmp_path, model="test-model")
     loop.tools.get_definitions = MagicMock(return_value=[])
     normal = _group_envelope(message="hello") if is_group else _dm_envelope(message="hello")
-    passive = _group_envelope(message="") if is_group else _dm_envelope(message="")
-    passive["envelope"]["dataMessage"]["reaction"] = {
-        "emoji": emoji,
-        "targetAuthorNumber": "+10000000000",
-        "targetSentTimestamp": 999,
-        "isRemove": remove,
-    }
+    is_reaction = feedback_kind != "emoji_message"
+    text = "" if is_reaction else emoji
+    passive = _group_envelope(message=text) if is_group else _dm_envelope(message=text)
+    if is_reaction:
+        passive["envelope"]["dataMessage"]["reaction"] = {
+            "emoji": emoji,
+            "targetAuthorNumber": "+10000000000",
+            "targetSentTimestamp": 999,
+            "isRemove": feedback_kind == "reaction_removal",
+        }
     chat_id = "group123==" if is_group else "+19995550001"
     try:
         if active:
@@ -1583,12 +1586,14 @@ async def test_reaction_evaluated_in_independent_turn(
             asyncio.gather(*loop._active_tasks[f"signal:{chat_id}"]), timeout=5,
         )
         assert provider.chat_stream_with_retry.await_count == 1 + int(active)
-        reaction_input = requests[-1][-1]["content"]
-        assert "Signal reaction feedback" in reaction_input
-        assert emoji in reaction_input
-        assert f'"remove": {str(remove).lower()}' in reaction_input
+        feedback_input = requests[-1][-1]["content"]
+        assert emoji in feedback_input
+        assert "finish with empty content" in feedback_input
+        if is_reaction:
+            assert "Signal reaction feedback" in feedback_input
+            assert f'"remove": {str(feedback_kind == "reaction_removal").lower()}' in feedback_input
         if active:
-            assert "Signal reaction feedback" not in str(requests[0])
+            assert "finish with empty content" not in str(requests[0])
             assert any(row.get("content") == "normal answer" for row in requests[-1])
         replies = []
         while not ch.bus.outbound.empty():
@@ -1601,10 +1606,65 @@ async def test_reaction_evaluated_in_independent_turn(
         assert [post["json"]["method"] for post in ch._http.posts] == ["send"] * len(expected)
         saved = await loop.sessions.state.read(f"signal:{chat_id}")
         assert len([message for message in saved.messages if message["role"] == "user"]) == 1 + int(active)
-        assert any("Signal reaction feedback" in str(message["content"]) for message in saved.messages)
+        assert any(emoji in str(message["content"]) for message in saved.messages)
     finally:
         release.set()
         await loop.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "extra", "optional"),
+    [
+        ("👍", {}, True),
+        (" 👍🏽 ❤️\n👨‍👩‍👧‍👦 ", {}, True),
+        ("🇫🇷", {}, True),
+        ("1️⃣", {}, True),
+        ("🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f", {}, True),
+        ("👍 oui", {}, False),
+        ("123", {}, False),
+        ("?!", {}, False),
+        ("/stop 👍", {}, False),
+        ("👍", {"quote": {"text": "Please confirm", "author": "+10000000000", "id": 999}}, False),
+        ("👍", {"mentions": [{"start": 0, "length": 2, "uuid": "bot-id"}]}, False),
+        ("👍", {"attachments": [{"id": "photo", "contentType": "image/png"}]}, False),
+    ],
+)
+async def test_emoji_only_message_classification(text, extra, optional):
+    ch = _make_channel()
+    ch._start_typing = AsyncMock()
+    ch._assemble_inbound_content = AsyncMock(return_value=(text, []))
+    params = _dm_envelope(message=text)
+    params["envelope"]["dataMessage"].update(extra)
+
+    await ch._handle_receive_notification(params)
+
+    inbound = ch.bus.inbound.get_nowait()
+    assert inbound.response_optional is optional
+    assert inbound.metadata["message_text"] == text
+    assert ch._start_typing.await_count == int(not optional)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_group", "overrides"),
+    [
+        (False, {"dm_enabled": False}),
+        (False, {"dm_policy": "allowlist", "dm_allow_from": ["+18885550000"]}),
+        (True, {"group_enabled": False}),
+        (True, {"group_enabled": True, "require_mention": True}),
+        (True, {"group_enabled": True, "group_policy": "allowlist", "group_allow_from": ["+18885550000"]}),
+    ],
+)
+async def test_emoji_only_message_respects_access_and_addressing(is_group, overrides):
+    ch = _make_channel(**overrides)
+    ch._start_typing = AsyncMock()
+    params = _group_envelope(message="👍") if is_group else _dm_envelope(message="👍")
+
+    await ch._handle_receive_notification(params)
+
+    assert ch.bus.inbound.empty()
+    ch._start_typing.assert_not_awaited()
 
 
 class TestSend:

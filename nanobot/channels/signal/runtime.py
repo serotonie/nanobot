@@ -16,6 +16,7 @@ from typing import Any, TypedDict, cast
 from urllib.parse import quote
 
 import httpx
+from emoji import purely_emoji
 from pydantic import Field, computed_field, field_validator
 
 from nanobot.bus.delivery import ChannelNotReadyError
@@ -486,7 +487,7 @@ class SignalChannel(BaseChannel):
                 session_key_override=session_key,
                 session_generation=session_generation,
                 require_existing_session=require_existing_session,
-                response_optional="reaction" in meta,
+                response_optional="reaction" in meta or meta.get("emoji_only") is True,
             )
         )
 
@@ -868,6 +869,13 @@ class SignalChannel(BaseChannel):
                 )
             return
 
+        emoji_only = (
+            reaction is None
+            and not attachments
+            and not mentions
+            and not data_message.get("quote")
+            and purely_emoji("".join(message_text.split()))
+        )
         content, media_paths = await self._assemble_inbound_content(
             sender_name=sender_name,
             sender_number=sender_number,
@@ -885,12 +893,18 @@ class SignalChannel(BaseChannel):
                 "A removal withdraws the reaction; it is not the opposite sentiment. "
                 "Do not invent the target message's text if it is unavailable. "
                 "Do not automatically mirror the reaction or acknowledge it. "
-                "If no reply is needed, finish with empty content."
+                "For this reaction only, if no reply is needed, finish with empty content."
+            )
+        elif emoji_only:
+            content += (
+                "\nEvaluate this emoji-only message in conversation context and decide whether "
+                "any action or reply is warranted. Emoji meanings are contextual, not fixed commands. "
+                "For this message only, if no reply is needed, finish with empty content."
             )
 
         self.logger.debug("Received Signal message from {}", sender_number)
 
-        if reaction is None:
+        if reaction is None and not emoji_only:
             await self._start_typing(chat_id)
         try:
             await self._handle_message(
@@ -907,6 +921,7 @@ class SignalChannel(BaseChannel):
                     "message_text": message_text,
                     **({"quote": data_message["quote"]} if data_message.get("quote") else {}),
                     **({"reaction": reaction} if reaction else {}),
+                    **({"emoji_only": True} if emoji_only else {}),
                 },
                 is_dm=not is_group_message,
             )

@@ -16,6 +16,7 @@ from typing import Any, TypedDict, cast
 from urllib.parse import quote
 
 import httpx
+from emoji import purely_emoji
 from pydantic import Field, computed_field, field_validator
 
 from nanobot.bus.delivery import ChannelNotReadyError
@@ -486,6 +487,7 @@ class SignalChannel(BaseChannel):
                 session_key_override=session_key,
                 session_generation=session_generation,
                 require_existing_session=require_existing_session,
+                response_optional="reaction" in meta or meta.get("emoji_only") is True,
             )
         )
 
@@ -815,7 +817,7 @@ class SignalChannel(BaseChannel):
         )
 
         reaction: _SignalReaction | None = None
-        if "reaction" in data_message:
+        if "reaction" in data_message and not message_text and not attachments:
             raw_reaction = _as_json_object(data_message["reaction"])
             if raw_reaction is None:
                 raise ValueError("Signal reaction must be an object")
@@ -831,15 +833,9 @@ class SignalChannel(BaseChannel):
                     "remove": raw_reaction.get("isRemove", False),
                 }
             )
-            action = "removed" if reaction["remove"] else "added"
-            message_text = (
-                f"[Signal reaction: {action} {reaction['emoji']} "
-                f"on message {reaction['target_timestamp']} "
-                f"by {reaction['target_author']}; passive notification, "
-                "do not react back or reply unless the user asks]"
-            )
-            attachments = []
+            message_text = f"[Signal reaction feedback: {json.dumps(reaction, ensure_ascii=False)}]"
             mentions = []
+
         if not message_text and not attachments:
             self.logger.debug("Ignoring empty message from {}", sender_number)
             return
@@ -864,7 +860,7 @@ class SignalChannel(BaseChannel):
             # Mirror Slack: let denied DMs reach the base-class
             # _handle_message so it can reply with a pairing code.
             # Group denials stay dropped.
-            if not is_group_message and self.config.dm.enabled:
+            if reaction is None and not is_group_message and self.config.dm.enabled:
                 await super()._handle_message(
                     sender_id=sender_id,
                     chat_id=chat_id,
@@ -873,6 +869,13 @@ class SignalChannel(BaseChannel):
                 )
             return
 
+        emoji_only = (
+            reaction is None
+            and not attachments
+            and not mentions
+            and not data_message.get("quote")
+            and purely_emoji("".join(message_text.split()))
+        )
         content, media_paths = await self._assemble_inbound_content(
             sender_name=sender_name,
             sender_number=sender_number,
@@ -883,10 +886,26 @@ class SignalChannel(BaseChannel):
             chat_id=chat_id,
             quoted_message=_as_json_object(data_message.get("quote")),
         )
+        if reaction is not None:
+            content += (
+                "\nEvaluate this reaction in conversation context and decide whether any action "
+                "or reply is warranted. Emoji meanings are contextual, not fixed commands. "
+                "A removal withdraws the reaction; it is not the opposite sentiment. "
+                "Do not invent the target message's text if it is unavailable. "
+                "Do not automatically mirror the reaction or acknowledge it. "
+                "For this reaction only, if no reply is needed, finish with empty content."
+            )
+        elif emoji_only:
+            content += (
+                "\nEvaluate this emoji-only message in conversation context and decide whether "
+                "any action or reply is warranted. Emoji meanings are contextual, not fixed commands. "
+                "For this message only, if no reply is needed, finish with empty content."
+            )
 
         self.logger.debug("Received Signal message from {}", sender_number)
 
-        await self._start_typing(chat_id)
+        if reaction is None and not emoji_only:
+            await self._start_typing(chat_id)
         try:
             await self._handle_message(
                 sender_id=sender_id,
@@ -902,6 +921,7 @@ class SignalChannel(BaseChannel):
                     "message_text": message_text,
                     **({"quote": data_message["quote"]} if data_message.get("quote") else {}),
                     **({"reaction": reaction} if reaction else {}),
+                    **({"emoji_only": True} if emoji_only else {}),
                 },
                 is_dm=not is_group_message,
             )
@@ -948,10 +968,9 @@ class SignalChannel(BaseChannel):
             )
 
             is_command = bool(message_text and message_text.strip().startswith("/"))
-            targets_bot = self._id_matches_account(reaction_target_author)
             if (
                 not is_command
-                and not targets_bot
+                and not self._id_matches_account(reaction_target_author)
                 and not self._should_respond_in_group(message_text, mentions)
             ):
                 self.logger.info(

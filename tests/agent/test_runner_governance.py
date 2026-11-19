@@ -17,6 +17,7 @@ from nanobot.agent.context_governance import (
     ModelRequestState,
     _request_extends_measured,
 )
+from nanobot.agent.hook import AgentHook
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.events import ContextCompactionEvent, EventSink
@@ -206,6 +207,240 @@ async def test_runner_summarizes_history_and_preserves_current_input(monkeypatch
     assert result.summary_checkpoint.summary == "fresh checkpoint"
     assert result.summary_checkpoint.transcript_boundary == 3
     assert any(message.get("content") == old_answer for message in result.messages)
+
+
+@pytest.mark.parametrize("reject_retry", [False, True])
+async def test_provider_overflow_compacts_then_retries_once(monkeypatch, reject_retry):
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = True
+    overflow = LLMResponse(
+        content="context limit exceeded", finish_reason="error",
+        error_code="context_length_exceeded",
+        usage=LLMUsage.reported(input_tokens=30, output_tokens=0),
+    )
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        overflow,
+        overflow if reject_retry else LLMResponse(
+            content="done", usage=LLMUsage.reported(input_tokens=100, output_tokens=10),
+        ),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    monkeypatch.setattr(
+        "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
+        lambda *_args, **_kwargs: (100, "underestimated"),
+    )
+    consolidate = AsyncMock(return_value="checkpoint")
+    prior_state = ProviderConversationState(
+        kind="test", provider="test", model="test-model", version=1,
+    )
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, initial_messages=None,
+        transcript_input=TranscriptInput(
+            history=[{"role": "user", "content": "old question"},
+                     {"role": "assistant", "content": "old answer"}],
+            current_message="new question",
+        ),
+        transcript_builder=_build_transcript, consolidate_history=consolidate,
+        provider_state=prior_state, tools=tools, model="test-model",
+        context_window_tokens=1_624, max_tokens=100, max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert provider.chat_stream_with_retry.await_count == 2
+    consolidate.assert_awaited_once()
+    retried = provider.chat_stream_with_retry.await_args.kwargs
+    assert retried["messages"] == [
+        {"role": "system", "content": "checkpoint"},
+        {"role": "user", "content": "new question"},
+    ]
+    assert retried["provider_context"].conversation_state is None
+    assert result.summary_checkpoint.summary == "checkpoint"
+    assert result.summary_checkpoint.transcript_boundary == 3
+    assert any(message.get("content") == "old answer" for message in result.messages)
+    assert result.stop_reason == ("error" if reject_retry else "completed")
+    assert result.usage.input_tokens == (60 if reject_retry else 130)
+
+
+async def test_provider_overflow_preserves_pending_tool_result_without_reexecution(monkeypatch):
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = False
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content=None,
+            tool_calls=[ToolCallRequest(id="action-1", name="action", arguments={})],
+        ),
+        LLMResponse(
+            content="ContextWindowExceededError", finish_reason="error",
+        ),
+        LLMResponse(content="done"),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="action already completed")
+    monkeypatch.setattr(
+        "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
+        lambda *_args, **_kwargs: (100, "underestimated"),
+    )
+    consolidate = AsyncMock(return_value="checkpoint")
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, initial_messages=None,
+        transcript_input=TranscriptInput(history=[], current_message="perform action"),
+        transcript_builder=_build_transcript, consolidate_history=consolidate,
+        tools=tools, model="test-model", max_iterations=2,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert result.final_content == "done"
+    tools.execute.assert_awaited_once()
+    retried = provider.chat_stream_with_retry.await_args.kwargs["messages"]
+    assert [message["role"] for message in retried] == ["system", "user", "assistant", "tool"]
+    assert retried[-1]["tool_call_id"] == "action-1"
+    assert retried[-1]["content"] == "action already completed"
+    assert result.summary_checkpoint.transcript_boundary == 2
+
+
+@pytest.mark.parametrize("started", ["content", "reasoning", "hosted_tool"])
+async def test_provider_overflow_does_not_replay_started_output(monkeypatch, started):
+    class StreamingHook(AgentHook):
+        def wants_streaming(self):
+            return True
+
+    async def request(**kwargs):
+        if started == "hosted_tool":
+            await kwargs["on_tool_call_delta"]({
+                "kind": "hosted_tool", "phase": "start", "call_id": "hosted-1",
+            })
+        else:
+            await kwargs["on_content_delta" if started == "content" else "on_thinking_delta"](
+                "partial output",
+            )
+        return LLMResponse(content="context_length_exceeded", finish_reason="error")
+
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = False
+    provider.chat_stream_with_retry = AsyncMock(side_effect=request)
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    consolidate = AsyncMock(return_value="checkpoint")
+    monkeypatch.setattr(
+        "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
+        lambda *_args, **_kwargs: (100, "test"),
+    )
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, initial_messages=[{"role": "user", "content": "hello"}],
+        tools=tools, model="test-model", max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        consolidate_history=consolidate, hook=StreamingHook(),
+    ))
+
+    assert result.stop_reason == "error"
+    provider.chat_stream_with_retry.assert_awaited_once()
+    consolidate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("summary", [None, "oversized checkpoint"])
+async def test_provider_overflow_stops_when_compaction_cannot_fit(monkeypatch, summary):
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = False
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
+        content="context_length_exceeded", finish_reason="error",
+    ))
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    consolidate = AsyncMock(return_value=summary)
+    monkeypatch.setattr(
+        "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
+        lambda _provider, _model, messages, _tools: (
+            600 if messages[0]["content"] == "oversized checkpoint" else 100,
+            "test-counter",
+        ),
+    )
+    events = []
+
+    async def observe(event):
+        if isinstance(event, ContextCompactionEvent):
+            events.append(event.phase)
+
+    with pytest.raises(ContextWindowExceededError):
+        await AgentRunner().run(make_run_spec(
+            provider, initial_messages=None,
+            transcript_input=TranscriptInput(
+                history=[{"role": "assistant", "content": "old answer"}],
+                current_message="new question",
+            ),
+            transcript_builder=_build_transcript, consolidate_history=consolidate,
+            tools=tools, model="test-model", context_window_tokens=1_624,
+            max_tokens=100, max_iterations=1, events=EventSink(observe),
+            max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        ))
+
+    provider.chat_stream_with_retry.assert_awaited_once()
+    consolidate.assert_awaited_once()
+    assert events == ["started", "failed"]
+
+
+@pytest.mark.parametrize("hosted_tool_started", [False, True])
+async def test_no_tools_finalization_recovers_overflow_unless_hosted_tool_started(
+    monkeypatch, hosted_tool_started,
+):
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = False
+    requests = []
+
+    async def request(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            return LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="action-1", name="action", arguments={})],
+                usage=LLMUsage.reported(input_tokens=20, output_tokens=10),
+            )
+        if len(requests) == 2:
+            if hosted_tool_started:
+                await kwargs["on_tool_call_delta"]({
+                    "kind": "hosted_tool", "phase": "start", "call_id": "hosted-1",
+                })
+            return LLMResponse(
+                content="context_length_exceeded", finish_reason="error",
+                usage=LLMUsage.reported(input_tokens=30, output_tokens=0),
+            )
+        return LLMResponse(
+            content="done", usage=LLMUsage.reported(input_tokens=100, output_tokens=10),
+        )
+
+    provider.chat_stream_with_retry = request
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="action completed")
+    consolidate = AsyncMock(return_value="checkpoint")
+    monkeypatch.setattr(
+        "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
+        lambda *_args, **_kwargs: (100, "underestimated"),
+    )
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, initial_messages=None,
+        transcript_input=TranscriptInput(history=[], current_message="perform action"),
+        transcript_builder=_build_transcript, consolidate_history=consolidate,
+        tools=tools, model="test-model", max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    tools.execute.assert_awaited_once()
+    assert len(requests) == (2 if hosted_tool_started else 3)
+    assert requests[-1]["tools"] is None
+    if hosted_tool_started:
+        consolidate.assert_not_awaited()
+    else:
+        consolidate.assert_awaited_once()
+        assert result.final_content == "done"
+        assert requests[-1]["messages"][0]["content"] == "checkpoint"
+        assert requests[-1]["messages"][-2]["content"] == "action completed"
+        assert result.usage.input_tokens == 150
 
 
 async def test_runner_rejects_oversized_delta_without_summarizable_history(monkeypatch):

@@ -824,9 +824,35 @@ class LLMProvider(ABC):
         err = (content or "").lower()
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
+    @staticmethod
+    def is_context_window_error(response: LLMResponse) -> bool:
+        """Recognize input overflow before retrying an unchanged request."""
+        if response.finish_reason != "error":
+            return False
+        tokens = {
+            (value or "").strip().lower()
+            for value in (response.error_kind, response.error_type, response.error_code)
+        }
+        if tokens & {
+            "context_length", "context_length_exceeded", "context_window_exceeded",
+            "contextwindowexceedederror", "prompt_too_long",
+        }:
+            return True
+        content = (response.content or "").lower()
+        return any(marker in content for marker in (
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "contextwindowexceedederror",
+            "maximum context length",
+            "prompt is too long",
+            "input exceeds the local context budget",
+        ))
+
     @classmethod
     def is_transient_response(cls, response: LLMResponse) -> bool:
         """Prefer structured error metadata, fallback to text markers for legacy providers."""
+        if cls.is_context_window_error(response):
+            return False
         if response.error_should_retry is not None:
             return bool(response.error_should_retry)
 

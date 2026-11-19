@@ -187,6 +187,27 @@ async def test_fallback_preserves_the_operation_event_sink():
     assert fallback.context_calls[0].events is events
 
 
+async def test_context_overflow_returns_to_runner_before_fallback():
+    overflow = _make_response(
+        "HTTP 500: ContextWindowExceededError",
+        finish_reason="error", error_status_code=500, error_should_retry=True,
+    )
+    primary = _FakeProvider("primary", overflow)
+    factory = MagicMock()
+    provider = FallbackProvider(
+        primary=primary, fallback_presets=[_fallback("fallback-a")],
+        provider_factory=factory,
+    )
+
+    result = await provider.chat_stream_with_retry(
+        messages=[{"role": "user", "content": "hello"}], model="primary",
+    )
+
+    assert result.content == overflow.content
+    assert len(primary.chat_stream_calls) == 1
+    factory.assert_not_called()
+
+
 def test_fallback_model_preset_ref_must_exist() -> None:
     from nanobot.config.schema import Config
 

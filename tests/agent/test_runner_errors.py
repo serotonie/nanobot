@@ -71,7 +71,8 @@ async def test_tool_execution_does_not_duplicate_existing_error_hint():
         execute=AsyncMock(return_value=ToolResult.error("Error: boom" + error_hint)),
     )
 
-    results, events = await execute_tool_calls(
+    settled = []
+    await execute_tool_calls(
         tools,
         [ToolCallRequest(id="call_1", name="list_dir", arguments={})],
         concurrent=False,
@@ -79,11 +80,13 @@ async def test_tool_execution_does_not_duplicate_existing_error_hint():
         workspace_violation_counts={},
         hook=AgentHook(),
         context=AgentHookContext(iteration=0, messages=[]),
+        on_settled=AsyncMock(side_effect=settled.extend),
     )
 
-    assert results == ["Error: boom" + error_hint]
-    assert results[0].count(error_hint) == 1
-    assert events[0]["status"] == "error"
+    [completed] = settled
+    assert completed.result == "Error: boom" + error_hint
+    assert completed.result.count(error_hint) == 1
+    assert completed.event["status"] == "error"
 
 
 @pytest.mark.asyncio
@@ -109,7 +112,8 @@ async def test_tool_execution_propagates_control_flow_exceptions(control_error: 
 
 
 @pytest.mark.asyncio
-async def test_llm_error_not_appended_to_session_messages():
+@pytest.mark.parametrize("response_optional", [False, True])
+async def test_llm_error_not_appended_to_session_messages(response_optional):
     """When LLM returns finish_reason='error', the error content must NOT be
     appended to the messages list (prevents polluting session history)."""
     from nanobot.agent.runner import (
@@ -131,6 +135,7 @@ async def test_llm_error_not_appended_to_session_messages():
         model="test-model",
         max_iterations=5,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        response_optional=response_optional,
     ))
 
     assert result.stop_reason == "error"

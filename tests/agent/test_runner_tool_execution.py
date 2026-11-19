@@ -23,6 +23,41 @@ from nanobot.providers.openai_responses.parsing import parse_response_output
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_iterations", [1, 3])
+async def test_optional_response_can_act_then_finish_silently(max_iterations):
+    provider = MagicMock()
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest(
+                id="feedback", name="write_file",
+                arguments={"path": "feedback.txt", "content": "Recheck the previous answer."},
+            ),
+        ]),
+        LLMResponse(content=""),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="Feedback saved")
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, tools=tools, model="test-model", max_iterations=max_iterations,
+        initial_messages=[{"role": "user", "content": "Reaction feedback: 👎"}],
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        response_optional=True,
+    ))
+
+    tools.execute.assert_awaited_once_with(
+        "write_file", {"path": "feedback.txt", "content": "Recheck the previous answer."},
+    )
+    assert provider.chat_stream_with_retry.await_count == 2
+    assert result.tools_used == ["write_file"]
+    assert result.stop_reason == "no_response"
+    assert result.final_content is None
+    assert result.error is None
+    assert result.messages[-1]["role"] == "tool"
+
+
 @pytest.mark.parametrize("schema, emitted, expected", [
     ({"oneOf": [
         {"type": "object", "properties": {"count": {"type": "string"}}, "required": ["count"]},

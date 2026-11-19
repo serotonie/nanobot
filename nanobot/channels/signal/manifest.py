@@ -26,5 +26,6 @@ PLUGIN = ChannelPlugin(
     display_name="Signal",
     runtime=f"{__package__}.runtime:SignalChannel",
     setup=SETUP_SPEC,
+    dependencies=("emoji>=2.0.0,<3.0.0",),
     webui="webui/index.ts",
 )

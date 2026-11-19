@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.agent.tools.base import Tool, ToolResult
@@ -36,6 +37,10 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
         self._cached_definitions: list[dict[str, Any]] | None = None
+        # Deferred tool name -> idle TTL in seconds (0 = never expires).
+        self._deferred: dict[str, float] = {}
+        # Session key -> {deferred tool name: last use (monotonic)}.
+        self._activated: dict[str, dict[str, float]] = {}
 
     def register(self, tool: Tool) -> None:
         """Register a tool."""
@@ -45,7 +50,49 @@ class ToolRegistry:
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""
         self._tools.pop(name, None)
+        self._deferred.pop(name, None)
         self._cached_definitions = None
+
+    def defer(self, name: str, ttl_seconds: float = 0) -> None:
+        """Hide a registered tool's schema until a session activates it (still callable)."""
+        if name in self._tools:
+            self._deferred[name] = ttl_seconds
+            self._cached_definitions = None
+
+    @staticmethod
+    def _session_key() -> str:
+        ctx = current_request_context()
+        return (ctx.session_key if ctx is not None else None) or ""
+
+    def activate(self, names: list[str]) -> None:
+        """Expose deferred schemas to the current session until idle past their TTL."""
+        now = time.monotonic()
+        active = self._activated.setdefault(self._session_key(), {})
+        for name in names:
+            if name in self._deferred:
+                active[name] = now
+
+    def _active_names(self) -> set[str]:
+        """Names activated for the current session; drops expired entries."""
+        now = time.monotonic()
+        for key in list(self._activated):
+            active = self._activated[key]
+            for name in list(active):
+                ttl = self._deferred.get(name)
+                if ttl is None or (ttl and now - active[name] > ttl):
+                    del active[name]
+            if not active:
+                del self._activated[key]
+        return set(self._activated.get(self._session_key(), ()))
+
+    def deferred_tools(self) -> list[Tool]:
+        """Deferred tools whose schemas the current session has not activated."""
+        active = self._active_names()
+        return [
+            self._tools[n]
+            for n in sorted(self._deferred)
+            if n in self._tools and n not in active
+        ]
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
@@ -97,25 +144,35 @@ class ToolRegistry:
         """Get tool definitions with stable ordering for cache-friendly prompts.
 
         Built-in tools are sorted first as a stable prefix, then MCP tools are
-        sorted and appended. The result is cached until the next
+        sorted and appended. Deferred tools appear only while activated for the
+        current session. The deferred-free list is cached until the next
         register/unregister call.
         """
-        if self._cached_definitions is None:
-            definitions = [tool.to_schema() for tool in self._tools.values()]
-            builtins: list[dict[str, Any]] = []
-            mcp_tools: list[dict[str, Any]] = []
-            for schema in definitions:
-                name = self._schema_name(schema)
-                if name.startswith("mcp_"):
-                    mcp_tools.append(schema)
-                else:
-                    builtins.append(schema)
+        if not self._deferred:
+            return self._sorted_definitions(set())
+        return self._sorted_definitions(self._active_names())
 
-            builtins.sort(key=self._schema_name)
-            mcp_tools.sort(key=self._schema_name)
-            self._cached_definitions = builtins + mcp_tools
-
-        return self._cached_definitions
+    def _sorted_definitions(self, active: set[str]) -> list[dict[str, Any]]:
+        if not active and self._cached_definitions is not None:
+            return self._cached_definitions
+        definitions = [
+            tool.to_schema()
+            for name, tool in self._tools.items()
+            if name not in self._deferred or name in active
+        ]
+        builtins: list[dict[str, Any]] = []
+        mcp_tools: list[dict[str, Any]] = []
+        for schema in definitions:
+            if self._schema_name(schema).startswith("mcp_"):
+                mcp_tools.append(schema)
+            else:
+                builtins.append(schema)
+        builtins.sort(key=self._schema_name)
+        mcp_tools.sort(key=self._schema_name)
+        result = builtins + mcp_tools
+        if not active:
+            self._cached_definitions = result
+        return result
 
     def prepare_call(
         self,
@@ -200,6 +257,8 @@ class ToolRegistry:
         if error:
             return ToolResult.error(with_tool_error_hint(str(error)))
 
+        if name in self._deferred:
+            self.activate([name])
         try:
             assert tool is not None  # guarded by prepare_call()
             result = await tool.execute(**params)

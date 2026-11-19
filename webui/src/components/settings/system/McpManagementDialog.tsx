@@ -36,7 +36,11 @@ interface McpManagementDialogProps {
   onFieldChange: (presetName: string, fieldName: string, value: string) => void;
   onAction: (action: McpAction, name: string, values?: Record<string, string>) => void;
   onOAuthConnect: (name: string, reset?: boolean, values?: Record<string, string>) => void;
-  onToolsChange: (name: string, enabledTools: string[]) => void;
+  onToolsChange: (
+    name: string,
+    enabledTools: string[],
+    lazyLoading?: { lazy: boolean; eagerTools: string[] },
+  ) => void;
   onConfigureProxy?: () => void;
 }
 
@@ -65,6 +69,8 @@ export function McpManagementDialog({
   const [draftEnabledTools, setDraftEnabledTools] = useState<string[]>(
     preset.enabled_tools ?? ["*"],
   );
+  const [draftLazy, setDraftLazy] = useState(preset.lazy ?? false);
+  const [draftEagerTools, setDraftEagerTools] = useState<string[]>(preset.eager_tools ?? []);
   const testBusy = actionKey === `test:${preset.name}`;
   const reconnectBusy = actionKey === `reconnect:${preset.name}`;
   const removeBusy = actionKey === `remove:${preset.name}`;
@@ -98,7 +104,10 @@ export function McpManagementDialog({
     `settings.mcp.presetDescriptions.${preset.name}`,
     preset.description || preset.note || preset.name,
   );
-  const toolsDirty = initialTools.join("\n") !== draftTools.join("\n");
+  const lazyDirty =
+    draftLazy !== (preset.lazy ?? false) ||
+    normalizeTools(draftEagerTools).join("\n") !== normalizeTools(preset.eager_tools ?? []).join("\n");
+  const toolsDirty = initialTools.join("\n") !== draftTools.join("\n") || lazyDirty;
   const tabs: Array<{ value: McpManagementTab; label: ReactNode }> = [
     { value: "overview", label: tx("settings.mcp.overviewTab", "Overview") },
     {
@@ -118,6 +127,12 @@ export function McpManagementDialog({
     if (next.has(toolName)) next.delete(toolName);
     else next.add(toolName);
     setDraftEnabledTools(next.size === toolNames.length ? ["*"] : Array.from(next));
+  };
+
+  const toggleEagerTool = (toolName: string) => {
+    setDraftEagerTools((current) =>
+      current.includes(toolName) ? current.filter((name) => name !== toolName) : [...current, toolName],
+    );
   };
 
   const connect = () => {
@@ -219,6 +234,10 @@ export function McpManagementDialog({
               query={toolQuery}
               selectedTools={selectedTools}
               selectedToolCount={selectedToolCount}
+              lazy={draftLazy}
+              eagerTools={draftEagerTools}
+              onLazyChange={setDraftLazy}
+              onToggleEager={toggleEagerTool}
               toolsBusy={toolsBusy}
               testBusy={testBusy}
               configuredInstalled={configuredInstalled}
@@ -270,7 +289,7 @@ export function McpManagementDialog({
             <Button
               type="button"
               disabled={toolsBusy || !toolNames.length}
-              onClick={() => onToolsChange(preset.name, draftEnabledTools)}
+              onClick={() => onToolsChange(preset.name, draftEnabledTools, { lazy: draftLazy, eagerTools: draftEagerTools })}
               className="h-9 rounded-full px-4 text-[13px] font-semibold"
             >
               {toolsBusy ? (
@@ -366,6 +385,10 @@ function ToolsPanel({
   query,
   selectedTools,
   selectedToolCount,
+  lazy,
+  eagerTools,
+  onLazyChange,
+  onToggleEager,
   toolsBusy,
   testBusy,
   configuredInstalled,
@@ -382,6 +405,10 @@ function ToolsPanel({
   query: string;
   selectedTools: Set<string>;
   selectedToolCount: number;
+  lazy: boolean;
+  eagerTools: string[];
+  onLazyChange: (value: boolean) => void;
+  onToggleEager: (name: string) => void;
   toolsBusy: boolean;
   testBusy: boolean;
   configuredInstalled: boolean;
@@ -397,6 +424,25 @@ function ToolsPanel({
   if (!toolNames.length && testBusy) {
     return (
       <SkeletonStatus label={tx("settings.mcp.loadingTools", "Loading tools…")} className="space-y-4">
+        <label className="flex cursor-pointer items-start gap-3 rounded-floating border border-border/55 px-3.5 py-3">
+          <input
+            type="checkbox"
+            checked={lazy}
+            disabled
+            className="mt-1 h-4 w-4 shrink-0 cursor-pointer"
+          />
+          <span className="min-w-0">
+            <span className="block text-[13px] font-semibold text-foreground">
+              {tx("settings.mcp.lazyLoad", "Load tools on demand")}
+            </span>
+            <span className="block text-[12.5px] leading-5 text-muted-foreground">
+              {tx(
+                "settings.mcp.lazyLoadHint",
+                "Keep tool definitions out of the prompt until the agent searches for them. Tick “Always loaded” on a tool to opt it out.",
+              )}
+            </span>
+          </span>
+        </label>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="h-10 min-w-0 rounded-full bg-muted-foreground/20 sm:flex-1" />
           <div className="flex items-center justify-between gap-2 sm:justify-end">
@@ -465,6 +511,26 @@ function ToolsPanel({
 
   return (
     <div className="space-y-4">
+      <label className="flex cursor-pointer items-start gap-3 rounded-floating border border-border/55 px-3.5 py-3">
+        <input
+          type="checkbox"
+          checked={lazy}
+          disabled={toolsBusy}
+          onChange={(event) => onLazyChange(event.target.checked)}
+          className="mt-1 h-4 w-4 shrink-0 cursor-pointer"
+        />
+        <span className="min-w-0">
+          <span className="block text-[13px] font-semibold text-foreground">
+            {tx("settings.mcp.lazyLoad", "Load tools on demand")}
+          </span>
+          <span className="block text-[12.5px] leading-5 text-muted-foreground">
+            {tx(
+              "settings.mcp.lazyLoadHint",
+              "Keep tool definitions out of the prompt until the agent searches for them. Tick “Always loaded” on a tool to opt it out.",
+            )}
+          </span>
+        </span>
+      </label>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <label className="relative min-w-0 flex-1">
           <span className="sr-only">{tx("settings.mcp.searchTools", "Search tools")}</span>
@@ -493,10 +559,11 @@ function ToolsPanel({
         {filteredTools.length ? filteredTools.map((toolName) => {
           const selected = selectedTools.has(toolName);
           return (
-            <label
+            <div
               key={toolName}
-              className="flex min-h-11 cursor-pointer items-center gap-3 border-b border-border/45 px-3.5 py-2.5 transition-colors last:border-b-0 settings-hover has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-inset has-[:focus-visible]:ring-ring"
+              className="flex min-h-11 items-center gap-3 border-b border-border/45 px-3.5 py-2.5 transition-colors last:border-b-0 settings-hover has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-inset has-[:focus-visible]:ring-ring"
             >
+              <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
               <span className="relative h-5 w-5 shrink-0">
                 <input
                   type="checkbox"
@@ -520,7 +587,21 @@ function ToolsPanel({
               <code className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
                 {displayToolName(toolName, preset.name)}
               </code>
-            </label>
+              </label>
+              {lazy && selected ? (
+                <span className="flex shrink-0 items-center gap-1.5 text-[12px] text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    aria-label={`${tx("settings.mcp.alwaysLoaded", "Always loaded")}: ${displayToolName(toolName, preset.name)}`}
+                    checked={eagerTools.includes(toolName)}
+                    disabled={toolsBusy}
+                    onChange={() => onToggleEager(toolName)}
+                    className="h-3.5 w-3.5 cursor-pointer"
+                  />
+                  {tx("settings.mcp.alwaysLoaded", "Always loaded")}
+                </span>
+              ) : null}
+            </div>
           );
         }) : (
           <div className="px-4 py-10 text-center text-[12.5px] text-muted-foreground">

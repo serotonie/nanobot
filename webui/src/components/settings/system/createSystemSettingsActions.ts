@@ -688,12 +688,16 @@ export function createSystemSettingsActions({
     }
   };
 
-  const handleMcpToolsChange = async (name: string, enabledTools: string[]) => {
+  const handleMcpToolsChange = async (
+    name: string,
+    enabledTools: string[],
+    lazyLoading?: { lazy: boolean; eagerTools: string[] },
+  ) => {
     setMcpPresetAction(`tools:${name}`);
     setMcpMessage(null);
     setMcpError(null);
     try {
-      const payload = await updateMcpServerTools(client, name, enabledTools);
+      const payload = await updateMcpServerTools(client, name, enabledTools, lazyLoading);
       setMcpPresets(payload);
       applyMcpActionFeedback(payload);
       notifyMcpPresetsChanged(payload);

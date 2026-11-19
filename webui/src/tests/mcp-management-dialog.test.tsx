@@ -69,7 +69,25 @@ describe("McpManagementDialog", () => {
     expect(onToolsChange).not.toHaveBeenCalled();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
-    expect(onToolsChange).toHaveBeenCalledWith("docs", ["write_note", "list_sources"]);
+    expect(onToolsChange).toHaveBeenCalledWith("docs", ["write_note", "list_sources"], {
+      lazy: false,
+      eagerTools: [],
+    });
+  });
+
+  it("saves lazy loading with per-tool opt-outs", () => {
+    const onToolsChange = vi.fn();
+    renderDialog({ initialTab: "tools", onToolsChange });
+
+    const dialog = screen.getByRole("dialog", { name: "Docs MCP" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /Load tools on demand/ }));
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /Always loaded: search_docs/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+    expect(onToolsChange).toHaveBeenCalledWith("docs", ["*"], {
+      lazy: true,
+      eagerTools: ["search_docs"],
+    });
   });
 
   it("searches the inventory and exposes connection management in the same modal", () => {

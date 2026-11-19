@@ -156,15 +156,18 @@ for (const width of [390, 1440]) {
       test("MCP tools preserve the localized toolbar and checkbox rows", async ({ page }) => {
         await page.goto(fixture("tools"));
         const loaded = page.getByRole("tabpanel");
-        await expect(loaded.getByRole("checkbox")).toHaveCount(6);
+        const toolRows = loaded.locator(
+          "div.overflow-hidden > div:has(> label:has(input[type=checkbox]))",
+        );
+        await expect(toolRows).toHaveCount(6);
         await settle(page);
-        const row = await box(loaded.locator("label:has(input[type=checkbox])").first());
+        const row = await box(toolRows.first());
         const search = await box(loaded.locator("input:not([type=checkbox])"));
         await page.goto(fixture("tools", true));
         await expect(status(page)).toBeVisible();
         await settle(page);
         sameBox(await box(status(page).locator(".min-h-11").first()), row);
-        sameBox(await box(status(page).locator("[aria-hidden] > .flex > :first-child")), search);
+        sameBox(await box(status(page).locator(".h-10.min-w-0")), search);
         await noOverflow(page);
       });
 

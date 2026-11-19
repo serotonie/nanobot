@@ -2304,6 +2304,28 @@ Use `enabledTools` to register only a subset of tools from an MCP server:
 
 MCP tools are automatically discovered and registered on startup. The LLM can use them alongside built-in tools — no extra configuration needed.
 
+#### Lazy loading
+
+Every registered MCP tool schema is sent to the model on each request. Set `lazy` to `true` on a server to keep its tool schemas out of the prompt until the agent needs them. The agent then gets a single `tool_search` tool: searching by keyword makes the matching tools callable on its next step.
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "github": {
+        "url": "https://example.com/mcp",
+        "lazy": true,
+        "eagerTools": ["search_code"]
+      }
+    }
+  }
+}
+```
+
+`eagerTools` opts individual tools out of lazy loading so they stay loaded; it accepts raw MCP names or wrapped `mcp_<server>_<tool>` names. `lazyTtlMinutes` (default `30`, `0` = never) unloads a tool again after that many idle minutes. Tools found with `tool_search` are loaded per conversation: another session starts without them. The opt-outs in `eagerTools` always apply, including after a restart or a server reconnect.
+
+Both `lazy` and `eagerTools` are also available in **Settings → Apps → (MCP server) → Tools** (“Load tools on demand” and “Always loaded”).
+
 
 
 

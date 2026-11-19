@@ -190,7 +190,11 @@ export function AppsCatalogSettings({
   onMcpConfigImportChange: (value: string) => void;
   onSaveCustomMcp: () => void;
   onImportMcpConfig: () => void;
-  onMcpToolsChange: (name: string, enabledTools: string[]) => void;
+  onMcpToolsChange: (
+    name: string,
+    enabledTools: string[],
+    lazyLoading?: { lazy: boolean; eagerTools: string[] },
+  ) => void;
   onRestart?: () => void;
   isRestarting?: boolean;
 }) {
@@ -541,7 +545,11 @@ function McpAppsCatalogRow({
   onOAuthOpen: () => void;
   onOAuthCallbackUrlChange: (value: string) => void;
   onOAuthComplete: () => void;
-  onToolsChange: (name: string, enabledTools: string[]) => void;
+  onToolsChange: (
+    name: string,
+    enabledTools: string[],
+    lazyLoading?: { lazy: boolean; eagerTools: string[] },
+  ) => void;
 }) {
   const { t } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });

@@ -1308,6 +1308,8 @@ export interface McpPresetInfo {
   checked_at?: string | null;
   error?: string | null;
   enabled_tools?: string[];
+  lazy?: boolean;
+  eager_tools?: string[];
   source?: "preset" | "custom" | string;
   manifest?: AppManifest;
 }

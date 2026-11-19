@@ -424,6 +424,25 @@ function ToolsPanel({
   if (!toolNames.length && testBusy) {
     return (
       <SkeletonStatus label={tx("settings.mcp.loadingTools", "Loading tools…")} className="space-y-4">
+        <label className="flex cursor-pointer items-start gap-3 rounded-floating border border-border/55 px-3.5 py-3">
+          <input
+            type="checkbox"
+            checked={lazy}
+            disabled
+            className="mt-1 h-4 w-4 shrink-0 cursor-pointer"
+          />
+          <span className="min-w-0">
+            <span className="block text-[13px] font-semibold text-foreground">
+              {tx("settings.mcp.lazyLoad", "Load tools on demand")}
+            </span>
+            <span className="block text-[12.5px] leading-5 text-muted-foreground">
+              {tx(
+                "settings.mcp.lazyLoadHint",
+                "Keep tool definitions out of the prompt until the agent searches for them. Tick “Always loaded” on a tool to opt it out.",
+              )}
+            </span>
+          </span>
+        </label>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="h-10 min-w-0 rounded-full bg-muted-foreground/20 sm:flex-1" />
           <div className="flex items-center justify-between gap-2 sm:justify-end">

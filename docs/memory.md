@@ -25,6 +25,8 @@ When a conversation grows large, nanobot summarizes the conversation covered by 
 
 Compaction also runs after a configured period of inactivity, or when you send `/compact`. See [Auto Compact](./configuration.md#auto-compact) for idle timing and how to disable automatic idle compaction.
 
+Before a model request exceeds the configured context window (with space reserved for output and a safety buffer), nanobot compacts the accepted conversation history and continues with the summary and pending input. If the provider rejects an input that local estimation considered small enough, nanobot also compacts and retries that model request once. Completed local tools are not executed again. A request that already streamed output or started a provider-hosted tool is not replayed. If compaction fails, the remaining input still cannot fit, or the retry is rejected again, the error is surfaced instead of retrying indefinitely.
+
 Automatic compaction does not post lifecycle notices to built-in chat channels by default. This only silences chat messages: compaction still runs, and WebUI/TUI retain structured status and history. Manual `/compact` keeps its start and outcome feedback. Set `channels.showCompactionNotices: true` to enable automatic notices globally, or set `showCompactionNotices` in a channel's configuration to override that default. Omitted or `null` channel overrides inherit the global value; existing explicit QQ overrides are preserved.
 
 This file is updated as conversations are summarized. It uses one JSON record per line so nanobot can track which summaries have already been processed; it is primarily an internal working history, not a permanent archive.

@@ -64,6 +64,28 @@ def test_public_authentication_diagnosis_requires_credential_evidence(
     assert LLMProvider.public_error_kind(response) == expected
 
 
+@pytest.mark.parametrize("metadata", [
+    {"error_code": "context_length_exceeded"},
+    {"error_kind": "context_window_exceeded"},
+    {"error_type": "prompt_too_long"},
+    {"content": "HTTP 500: ContextWindowExceededError: prompt too large"},
+    {"content": "This model's maximum context length is 32768 tokens"},
+])
+async def test_context_overflow_returns_without_unchanged_retries(metadata):
+    response = LLMResponse(
+        finish_reason="error", error_status_code=500, error_should_retry=True,
+        **{"content": None, **metadata},
+    )
+    provider = ScriptedProvider([response])
+
+    result = await provider.chat_stream_with_retry(
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert result is response
+    assert provider.calls == 1
+
+
 @pytest.mark.asyncio
 async def test_chat_with_retry_retries_transient_error_then_succeeds(monkeypatch) -> None:
     provider = ScriptedProvider([

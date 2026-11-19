@@ -657,7 +657,6 @@ class ContextGovernor:
                     source=_source,
                 )
 
-            compaction.active_summary = summary
             # Fresh user input defines the next task. Only ongoing work without
             # new user input needs a temporary instruction to resume after H is replaced.
             continuation = (
@@ -693,6 +692,7 @@ class ContextGovernor:
             # establish a new provider-owned state at the rewritten boundary.
             state.conversation.replace_transcript(compaction.raw_messages)
             state.usage = None
+            compaction.active_summary = summary
             compaction.summary_checkpoint = SessionSummaryCheckpoint(
                 summary=summary,
                 transcript_boundary=compaction.raw_accepted_boundary,
@@ -714,6 +714,28 @@ class ContextGovernor:
             ),
         )
         return prepared
+
+    async def compact_rejected_request(
+        self,
+        state: ModelRequestState,
+        messages: list[dict[str, Any]],
+        *,
+        tool_definitions: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Compact after an authoritative overflow missed by local estimation."""
+        estimated, _ = await self.prepare_in_background(
+            estimate_prompt_tokens_chain,
+            state.config.provider, state.config.model, messages, tool_definitions,
+        )
+        logger.warning(
+            "Compacting context after provider input overflow for {}",
+            state.config.session_key or "default",
+        )
+        return await self._compact_request_history(
+            state, state.compaction, messages,
+            (estimated, "provider context rejection"),
+            tool_definitions=tool_definitions,
+        )
 
     async def prepare_request(
         self,

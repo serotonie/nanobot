@@ -643,13 +643,12 @@ class AgentRunner:
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=False)
                 request_state.recent_round_usages.append(None)
-                response = await self._request_finalization_retry(
+                response, retry_usage = await self._request_finalization_retry(
                     spec,
                     messages_for_model,
                     request_state=request_state,
                     transcript=messages,
                 )
-                retry_usage = await self._record_request_usage(spec, request_state, response)
                 round_usages.append(retry_usage)
                 usage = self._merge_usage(usage, retry_usage)
                 raw_usage = self._merge_usage(raw_usage, retry_usage)
@@ -1003,9 +1002,11 @@ class AgentRunner:
         *,
         request_state: ModelRequestState,
         malformed_retry: bool = False,
+        context_retry: bool = False,
         transcript: list[dict[str, Any]] | None,
     ) -> tuple[LLMResponse, LLMUsage]:
         _raise_if_cancelling()
+        request_messages = messages
         messages, kwargs = await self._prepare_model_request(
             spec,
             messages,
@@ -1017,6 +1018,7 @@ class AgentRunner:
         wants_streaming = hook.wants_streaming()
 
         active_hosted_tools: dict[str, dict[str, Any]] = {}
+        hosted_tool_started = False
         native_reasoning_open = False
         native_reasoning_close_task: asyncio.Task[None] | None = None
         request_started_at = 0.0
@@ -1074,8 +1076,10 @@ class AgentRunner:
                 raise cancellation
 
         async def _provider_tool_event(event: dict[str, Any]) -> None:
+            nonlocal hosted_tool_started
             if event.get("kind") != "hosted_tool":
                 return
+            hosted_tool_started = True
             await _close_native_reasoning()
             if event.get("phase") == "start":
                 _end_stream_segment()
@@ -1124,9 +1128,9 @@ class AgentRunner:
             kwargs.update(
                 on_content_delta=_stream,
                 on_thinking_delta=_thinking,
-                on_tool_call_delta=_provider_tool_event,
                 on_stream_recover=_stream_recover,
             )
+        kwargs["on_tool_call_delta"] = _provider_tool_event
         def record_timing(response: LLMResponse) -> None:
             _pause_generation()
             if first_output_at is not None:
@@ -1166,6 +1170,25 @@ class AgentRunner:
                     "error": response.content
                     or "Model request failed before the provider-hosted tool completed.",
                 })
+        if (
+            LLMProvider.is_context_window_error(response)
+            and not context_retry
+            and first_output_at is None
+            and not hosted_tool_started
+            and not response.has_tool_calls
+        ):
+            retry_messages = await self.context_governor.compact_rejected_request(
+                request_state, request_messages,
+                tool_definitions=spec.tools.get_definitions(),
+            )
+            retry_response, retry_usage = await self._request_model(
+                spec, retry_messages, hook, context,
+                request_state=request_state,
+                malformed_retry=malformed_retry,
+                context_retry=True,
+                transcript=transcript,
+            )
+            return retry_response, round_usage + retry_usage
         dropped, all_dropped, original_finish_reason = (
             self._drop_malformed_tool_calls(response)
         )
@@ -1185,6 +1208,7 @@ class AgentRunner:
                 spec, retry_messages, hook, context,
                 request_state=request_state,
                 malformed_retry=True,
+                context_retry=context_retry,
                 transcript=None,
             )
             return retry_response, round_usage + retry_usage
@@ -1199,15 +1223,10 @@ class AgentRunner:
             fallback_messages = self._malformed_tool_call_retry_messages(
                 messages, response.content,
             )
-            fallback_response = await self._request_no_tools(
+            fallback_response, fallback_usage = await self._request_no_tools(
                 spec,
                 fallback_messages,
                 request_state=request_state,
-            )
-            fallback_usage = await self._record_request_usage(
-                spec,
-                request_state,
-                fallback_response,
             )
             return fallback_response, round_usage + fallback_usage
         return response, round_usage
@@ -1278,9 +1297,9 @@ class AgentRunner:
         *,
         request_state: ModelRequestState,
         transcript: list[dict[str, Any]],
-    ) -> LLMResponse:
+    ) -> tuple[LLMResponse, LLMUsage]:
         retry_messages = self._finalization_retry_messages(messages)
-        response = await self._request_no_tools(
+        response, usage = await self._request_no_tools(
             spec,
             retry_messages,
             request_state=request_state,
@@ -1291,7 +1310,7 @@ class AgentRunner:
             transcript,
             adopt_candidate_state=False,
         )
-        return response
+        return response, usage
 
     @staticmethod
     def _finalization_retry_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1323,7 +1342,7 @@ class AgentRunner:
             )
         request_state.recent_round_usages.append(None)
         try:
-            response = await self._request_no_tools(
+            response, raw_usage = await self._request_no_tools(
                 spec,
                 retry_messages,
                 request_state=request_state,
@@ -1338,7 +1357,6 @@ class AgentRunner:
             )
             return None, usage
 
-        raw_usage = await self._record_request_usage(spec, request_state, response)
         round_usages.append(raw_usage)
         usage = self._merge_usage(usage, raw_usage)
         if response.finish_reason == "error" or response.has_tool_calls:
@@ -1375,7 +1393,8 @@ class AgentRunner:
         *,
         request_state: ModelRequestState,
         transcript: list[dict[str, Any]] | None = None,
-    ) -> LLMResponse:
+        context_retry: bool = False,
+    ) -> tuple[LLMResponse, LLMUsage]:
         _raise_if_cancelling()
         _, kwargs = await self._prepare_model_request(
             spec,
@@ -1385,6 +1404,14 @@ class AgentRunner:
             transcript=transcript,
         )
         _raise_if_cancelling()
+        hosted_tool_started = False
+
+        async def observe_tool(event: dict[str, Any]) -> None:
+            nonlocal hosted_tool_started
+            if event.get("kind") == "hosted_tool":
+                hosted_tool_started = True
+
+        kwargs["on_tool_call_delta"] = observe_tool
         response = await self._invoke_model(spec, request_state, kwargs)
         _raise_if_cancelling()
         await self.context_governor.summarize_provider_compaction(
@@ -1394,7 +1421,24 @@ class AgentRunner:
         )
         _raise_if_cancelling()
         request_state.provider_compaction_applied |= response.provider_compaction_applied
-        return response
+        usage = await self._record_request_usage(spec, request_state, response)
+        if (
+            LLMProvider.is_context_window_error(response)
+            and not context_retry
+            and not hosted_tool_started
+            and not response.has_tool_calls
+        ):
+            retry_messages = await self.context_governor.compact_rejected_request(
+                request_state, messages, tool_definitions=None,
+            )
+            retry_response, retry_usage = await self._request_no_tools(
+                spec, retry_messages,
+                request_state=request_state,
+                transcript=transcript,
+                context_retry=True,
+            )
+            return retry_response, usage + retry_usage
+        return response, usage
 
     @staticmethod
     def _budget_exhausted_finalization_messages(

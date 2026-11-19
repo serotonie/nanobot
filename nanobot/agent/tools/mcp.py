@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
 import httpx
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import tool_log_content_allowed
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
@@ -957,15 +957,6 @@ class MCPPromptWrapper(_MCPWrapperBase):
         return "\n".join(parts) or "(no output)"
 
 
-@tool_parameters(
-    tool_parameters_schema(
-        query=StringSchema(
-            "Keywords matching the capability you need (tool name or description). "
-            "Use an empty string to list every deferred tool.",
-        ),
-        required=["query"],
-    )
-)
 class ToolSearchTool(Tool):
     """Find lazily loaded MCP tools and make them callable."""
 
@@ -984,6 +975,16 @@ class ToolSearchTool(Tool):
         return (
             "Search tools that are not loaded yet (lazy MCP servers). Matching tools become "
             "available to call on your next step in this conversation and are unloaded after a period of inactivity."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return tool_parameters_schema(
+            query=StringSchema(
+                "Keywords matching the capability you need (tool name or description). "
+                "Use an empty string to list every deferred tool.",
+            ),
+            required=["query"],
         )
 
     @property

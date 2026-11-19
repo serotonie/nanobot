@@ -15,9 +15,10 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
 import httpx
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import tool_log_content_allowed
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 from nanobot.config.network import NetworkConfig
 from nanobot.security.network import (
     PinnedDNSAsyncTransport,
@@ -909,6 +910,54 @@ class MCPPromptWrapper(_MCPWrapperBase):
         return "\n".join(parts) or "(no output)"
 
 
+@tool_parameters(
+    tool_parameters_schema(
+        query=StringSchema(
+            "Keywords matching the capability you need (tool name or description). "
+            "Use an empty string to list every deferred tool.",
+        ),
+        required=["query"],
+    )
+)
+class ToolSearchTool(Tool):
+    """Find lazily loaded MCP tools and make them callable."""
+
+    _plugin_discoverable = False
+    _MAX_RESULTS = 10
+
+    def __init__(self, registry: ToolRegistry):
+        self._registry = registry
+
+    @property
+    def name(self) -> str:
+        return "tool_search"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search tools that are not loaded yet (lazy MCP servers). Matching tools become "
+            "available to call on your next step in this conversation and are unloaded after a period of inactivity."
+        )
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    async def execute(self, query: str = "", **kwargs: Any) -> str:
+        pending = self._registry.deferred_tools()
+        words = query.lower().split()
+        matches = [
+            t for t in pending
+            if all(w in f"{t.name} {t.description}".lower() for w in words)
+        ]
+        if not matches:
+            return f"No deferred tools match '{query}'. {len(pending)} deferred tools remain."
+        matches = matches[: self._MAX_RESULTS]
+        self._registry.activate([t.name for t in matches])
+        lines = [f"- {t.name}: {t.description.splitlines()[0][:200]}" for t in matches]
+        return "Now available to call:\n" + "\n".join(lines)
+
+
 async def connect_mcp_servers(
     mcp_servers: dict[str, MCPServerConfig],
     registry: ToolRegistry,
@@ -1192,6 +1241,18 @@ async def connect_mcp_servers(
                     "(enabledTools does not include '*' — only tools allowed)",
                     name,
                 )
+
+            if cfg.lazy:
+                eager = set(cfg.eager_tools)
+                for tool_name in list(registry.tool_names):
+                    tool = registry.get(tool_name)
+                    if not _tool_belongs_to_server(tool, tool_name, name):
+                        continue
+                    raw_name = getattr(tool, "_original_name", None)
+                    if tool_name not in eager and raw_name not in eager:
+                        registry.defer(tool_name, cfg.lazy_ttl_minutes * 60)
+                if "tool_search" not in registry:
+                    registry.register(ToolSearchTool(registry))
 
             logger.info(
                 "MCP server '{}': connected, {} capabilities registered", name, registered_count

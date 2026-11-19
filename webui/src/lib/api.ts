@@ -1249,11 +1249,16 @@ export async function updateMcpServerTools(
   transport: WebUIMutationTransport,
   name: string,
   enabledTools: string[],
+  lazyLoading?: { lazy: boolean; eagerTools: string[] },
 ): Promise<McpPresetsPayload> {
   return mutation<McpPresetsPayload>(
     transport,
     "settings.mcp.tools",
-    { name, enabled_tools: enabledTools },
+    {
+      name,
+      enabled_tools: enabledTools,
+      ...(lazyLoading ? { lazy: lazyLoading.lazy, eager_tools: lazyLoading.eagerTools } : {}),
+    },
   );
 }
 

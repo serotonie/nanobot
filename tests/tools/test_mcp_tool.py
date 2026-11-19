@@ -20,6 +20,7 @@ from nanobot.agent.tools.mcp import (
     MCPProvider,
     MCPResourceWrapper,
     MCPToolWrapper,
+    ToolSearchTool,
     _normalize_windows_stdio_command,
     _sanitize_mcp_tool_name,
     _sanitize_name,
@@ -160,6 +161,61 @@ def _make_wrapper(session: object, *, timeout: float = 0.1) -> MCPToolWrapper:
         inputSchema={"type": "object", "properties": {}},
     )
     return MCPToolWrapper(session, "test", tool_def, tool_timeout=timeout)
+
+
+@pytest.mark.asyncio
+async def test_tool_search_activates_per_session_and_expires(monkeypatch) -> None:
+    registry = ToolRegistry()
+    wrapper = _make_wrapper(object())
+    registry.register(wrapper)
+    registry.defer(wrapper.name, ttl_seconds=60)
+    registry.register(ToolSearchTool(registry))
+
+    def names() -> set[str]:
+        return {d["function"]["name"] for d in registry.get_definitions()}
+
+    def ctx(key: str) -> RequestContext:
+        return RequestContext(channel="cli", chat_id=key, session_key=key)
+
+    with request_context(ctx("a")):
+        assert names() == {"tool_search"}
+        assert "No deferred tools match" in await registry.execute("tool_search", {"query": "nothing"})
+        assert wrapper.name in await registry.execute("tool_search", {"query": "demo"})
+        assert wrapper.name in names()
+
+    with request_context(ctx("b")):
+        assert names() == {"tool_search"}
+
+    real = __import__("time").monotonic()
+    monkeypatch.setattr("nanobot.agent.tools.registry.time.monotonic", lambda: real + 61)
+    with request_context(ctx("a")):
+        assert names() == {"tool_search"}
+
+
+@pytest.mark.asyncio
+async def test_lazy_server_keeps_eager_tools_loaded(
+    fake_mcp_runtime: dict[str, object | None],
+) -> None:
+    fake_mcp_runtime["session"] = _make_fake_session(["demo", "other"])
+    registry = ToolRegistry()
+    stacks = await connect_mcp_servers(
+        {"test": MCPServerConfig(command="fake", lazy=True, eager_tools=["demo"])},
+        registry,
+    )
+    for stack in stacks.values():
+        await stack.aclose()
+
+    names = {d["function"]["name"] for d in registry.get_definitions()}
+    assert names == {"mcp_test_demo", "tool_search"}
+
+    # A reconnect re-registers the wrappers; the opt-out must still apply.
+    mcp_mod._unregister_server_tools(registry, "test")
+    cfg = MCPServerConfig(command="fake", lazy=True, eager_tools=["demo"])
+    stacks = await connect_mcp_servers({"test": cfg}, registry)
+    for stack in stacks.values():
+        await stack.aclose()
+    names = {d["function"]["name"] for d in registry.get_definitions()}
+    assert names == {"mcp_test_demo", "tool_search"}
 
 
 @pytest.mark.asyncio

@@ -510,6 +510,8 @@ def _preset_payload(preset: McpPreset, configured_servers: dict[str, MCPServerCo
         "required_fields": [_field_payload(field, cfg) for field in preset.fields],
         "connection_summary": _connection_summary(cfg),
         "enabled_tools": _tool_allowlist(cfg),
+        "lazy": cfg.lazy if cfg is not None else False,
+        "eager_tools": list(cfg.eager_tools) if cfg is not None else [],
         "source": "preset",
         "manifest": _preset_manifest(preset, logo_url=logo_url),
     }
@@ -550,6 +552,8 @@ def _custom_payload(
         "required_fields": [],
         "connection_summary": _connection_summary(cfg),
         "enabled_tools": _tool_allowlist(cfg),
+        "lazy": cfg.lazy,
+        "eager_tools": list(cfg.eager_tools),
         "tool_names": tool_names or [],
         "source": "custom",
         "manifest": _custom_manifest(name, cfg),
@@ -1021,6 +1025,17 @@ def _mcp_server_config(name: str, raw: Any) -> tuple[str, MCPServerConfig]:
     headers_value: object = server.get("headers") or {}
     cwd = str(server.get("cwd") or "").strip()
     enabled_tools_value: object = server.get("enabledTools", server.get("enabled_tools", ["*"]))
+    lazy_value: object = server.get("lazy", False)
+    eager_tools_value: object = server.get("eagerTools", server.get("eager_tools", []))
+    if not isinstance(lazy_value, bool):
+        raise McpPresetError(f"MCP server '{server_name}' lazy must be a boolean")
+    lazy_ttl_value: object = server.get("lazyTtlMinutes", server.get("lazy_ttl_minutes", 30))
+    if isinstance(lazy_ttl_value, bool) or not isinstance(lazy_ttl_value, int) or lazy_ttl_value < 0:
+        raise McpPresetError(f"MCP server '{server_name}' lazyTtlMinutes must be a non-negative integer")
+    if not isinstance(eager_tools_value, list) or not all(
+        isinstance(item, str) for item in cast(list[object], eager_tools_value)
+    ):
+        raise McpPresetError(f"MCP server '{server_name}' eagerTools must be a string array")
     tool_timeout: object = server.get("toolTimeout", server.get("tool_timeout", _DEFAULT_CUSTOM_TIMEOUT))
     try:
         timeout_int = max(5, min(int(cast(Any, tool_timeout)), 600))
@@ -1069,6 +1084,9 @@ def _mcp_server_config(name: str, raw: Any) -> tuple[str, MCPServerConfig]:
         use_proxy=use_proxy,
         tool_timeout=timeout_int,
         enabled_tools=cast(list[str], enabled_tools_value),
+        lazy=lazy_value,
+        lazy_ttl_minutes=lazy_ttl_value,
+        eager_tools=cast(list[str], eager_tools_value),
     )
 
 
@@ -1151,6 +1169,14 @@ def custom_mcp_action(
         if cfg is None:
             raise McpPresetError("unknown MCP server", status=404)
         cfg.enabled_tools = _parse_enabled_tools(_query_first(query, "enabled_tools"))
+        raw_lazy = _query_first(query, "lazy")
+        if raw_lazy is not None:
+            if raw_lazy.lower() not in {"true", "false"}:
+                raise McpPresetError("lazy must be true or false")
+            cfg.lazy = raw_lazy.lower() == "true"
+        raw_eager = _query_first(query, "eager_tools")
+        if raw_eager is not None:
+            cfg.eager_tools = _parse_string_list(raw_eager)
         config.tools.mcp_servers[name] = cfg
         save_config(config, config_path)
         payload = mcp_presets_payload(

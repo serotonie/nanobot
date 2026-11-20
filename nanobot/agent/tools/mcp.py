@@ -973,8 +973,9 @@ class ToolSearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search tools that are not loaded yet (lazy MCP servers). Matching tools become "
-            "available to call on your next step in this conversation and are unloaded after a period of inactivity."
+            "Search MCP tools whose schemas are not loaded (lazy servers). Call it before saying a capability "
+            "is unavailable, and again when a tool used earlier is no longer listed: tools are unloaded after "
+            "inactivity and when the conversation is compacted. Matches become callable on your next step."
         )
 
     @property

@@ -914,12 +914,15 @@ class AgentRunner:
         request_state: ModelRequestState,
         transcript: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        checkpoint = request_state.compaction.summary_checkpoint
         messages, provider_context = await self.context_governor.prepare_request(
             request_state,
             messages,
             tool_definitions=tools,
             transcript=transcript,
         )
+        if request_state.compaction.summary_checkpoint is not checkpoint:
+            tools = self._unload_deferred_tools(spec, request_state, tools)
         generation = spec.runtime.generation
         return messages, {
             "messages": messages,
@@ -934,6 +937,19 @@ class AgentRunner:
                 response_preset=spec.runtime.model_preset or "",
             ),
         }
+
+    @staticmethod
+    def _unload_deferred_tools(
+        spec: AgentRunSpec,
+        state: ModelRequestState,
+        tools: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Drop lazily loaded schemas once compaction shows the context overflowed."""
+        if not spec.tools.deactivate() or tools is None:
+            return tools
+        tools = spec.tools.get_definitions()
+        state.tool_definitions = deepcopy(tools)
+        return tools
 
     async def _invoke_model(
         self, spec: AgentRunSpec, state: ModelRequestState, kwargs: dict[str, Any],
@@ -1181,6 +1197,7 @@ class AgentRunner:
                 request_state, request_messages,
                 tool_definitions=spec.tools.get_definitions(),
             )
+            spec.tools.deactivate()
             retry_response, retry_usage = await self._request_model(
                 spec, retry_messages, hook, context,
                 request_state=request_state,
@@ -1431,6 +1448,7 @@ class AgentRunner:
             retry_messages = await self.context_governor.compact_rejected_request(
                 request_state, messages, tool_definitions=None,
             )
+            spec.tools.deactivate()
             retry_response, retry_usage = await self._request_no_tools(
                 spec, retry_messages,
                 request_state=request_state,

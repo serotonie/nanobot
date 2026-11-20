@@ -302,6 +302,49 @@ async def test_provider_overflow_preserves_pending_tool_result_without_reexecuti
     assert result.summary_checkpoint.transcript_boundary == 2
 
 
+async def test_provider_overflow_unloads_lazily_loaded_tools(monkeypatch):
+    from nanobot.agent.tools.base import Tool
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    class Deferred(Tool):
+        name = "mcp_srv_lookup"
+        description = "lookup"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            return "ok"
+
+    tools = ToolRegistry()
+    tools.register(Deferred())
+    tools.defer("mcp_srv_lookup")
+    tools.activate(["mcp_srv_lookup"])
+    names = lambda kwargs: [t["function"]["name"] for t in kwargs["tools"]]  # noqa: E731
+    provider = MagicMock(spec=LLMProvider)
+    provider.can_resume_conversation_state.return_value = False
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content="context_length_exceeded", finish_reason="error"),
+        LLMResponse(content="done"),
+    ])
+    monkeypatch.setattr(
+        "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
+        lambda *_args, **_kwargs: (100, "underestimated"),
+    )
+
+    result = await AgentRunner().run(make_run_spec(
+        provider, initial_messages=None,
+        transcript_input=TranscriptInput(history=[], current_message="hello"),
+        transcript_builder=_build_transcript,
+        consolidate_history=AsyncMock(return_value="checkpoint"),
+        tools=tools, model="test-model", max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    first, retried = [c.kwargs for c in provider.chat_stream_with_retry.await_args_list]
+    assert names(first) == ["mcp_srv_lookup"]
+    assert names(retried) == []
+    assert result.final_content == "done"
+
+
 @pytest.mark.parametrize("started", ["content", "reasoning", "hosted_tool"])
 async def test_provider_overflow_does_not_replay_started_output(monkeypatch, started):
     class StreamingHook(AgentHook):

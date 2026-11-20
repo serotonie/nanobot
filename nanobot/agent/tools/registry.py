@@ -72,6 +72,10 @@ class ToolRegistry:
             if name in self._deferred:
                 active[name] = now
 
+    def deactivate(self) -> bool:
+        """Hide every deferred schema the current session activated."""
+        return self._activated.pop(self._session_key(), None) is not None
+
     def _active_names(self) -> set[str]:
         """Names activated for the current session; drops expired entries."""
         now = time.monotonic()

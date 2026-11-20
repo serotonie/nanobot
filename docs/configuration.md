@@ -2322,7 +2322,7 @@ Every registered MCP tool schema is sent to the model on each request. Set `lazy
 }
 ```
 
-`eagerTools` opts individual tools out of lazy loading so they stay loaded; it accepts raw MCP names or wrapped `mcp_<server>_<tool>` names. `lazyTtlMinutes` (default `30`, `0` = never) unloads a tool again after that many idle minutes. Tools found with `tool_search` are loaded per conversation: another session starts without them. The opt-outs in `eagerTools` always apply, including after a restart or a server reconnect.
+`eagerTools` opts individual tools out of lazy loading so they stay loaded; it accepts raw MCP names or wrapped `mcp_<server>_<tool>` names. `lazyTtlMinutes` (default `30`, `0` = never) unloads a tool again after that many idle minutes. Tools found with `tool_search` are loaded per conversation: another session starts without them. The opt-outs in `eagerTools` always apply, including after a restart or a server reconnect. When a conversation is compacted because it outgrew the context window, its loaded tools are unloaded as well and the agent searches again if it still needs them.
 
 Both `lazy` and `eagerTools` are also available in **Settings → Apps → (MCP server) → Tools** (“Load tools on demand” and “Always loaded”).
 

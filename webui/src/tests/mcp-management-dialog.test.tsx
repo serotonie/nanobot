@@ -16,6 +16,8 @@ import {
   installSettingsViewTestHooks,
   jsonResponse,
   renderSettingsView,
+  selectToolType,
+  showOnlyReadyTools,
   requestMutationMock,
   settingsPayload,
 } from "@/tests/settings-test-utils";
@@ -290,7 +292,8 @@ describe("MCP connection draft lifecycle", () => {
       return { ok: false, status: 404, text: async () => "Not found" } as Response;
     }));
     renderSettingsView({ initialSection: "apps" });
-    fireEvent.click(await screen.findByRole("button", { name: "MCP" }));
+    await selectToolType("MCP");
+    await showOnlyReadyTools(false);
     fireEvent.click(await screen.findByRole("button", { name: "Metabase" }));
     const dialog = await screen.findByRole("dialog", { name: "Metabase" });
     expect(within(dialog).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
@@ -367,7 +370,8 @@ describe("MCP connection draft lifecycle", () => {
     });
 
     renderSettingsView({ initialSection: "apps" });
-    fireEvent.click(await screen.findByRole("button", { name: "MCP" }));
+    await selectToolType("MCP");
+    await showOnlyReadyTools(false);
     fireEvent.click(await screen.findByRole("button", { name: "Connect Xmind" }));
     fireEvent.click(screen.getByRole("switch", { name: "Use proxy" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
@@ -514,10 +518,8 @@ function renderMcpActions() {
       state,
       featureCatalog: [],
       client,
-      token: "tok",
       getToken: () => "tok",
       t: i18n.t,
-      applyPayload: vi.fn(),
       maybeRestartHostEngine: vi.fn(),
       setPendingRestartSections: vi.fn(),
       refreshAutomations: vi.fn(),
